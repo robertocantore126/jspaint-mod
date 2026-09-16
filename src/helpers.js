@@ -1,6 +1,6 @@
 // @ts-check
 
-/* global AccessKeys, main_canvas */
+/* global $canvas_area, AccessKeys, main_canvas */
 /* eslint-disable @stylistic/space-unary-ops */
 
 const TAU =
@@ -415,6 +415,25 @@ function from_canvas_coords({ x, y }) {
 		clientY: ~~(y / main_canvas.height * rect.height + rect.top),
 	};
 }
+/**
+ * The position of the canvas's top-left corner relative to the scrolled contents of the canvas area,
+ * i.e. where the canvas coordinate system begins within the scrollable space.
+ * These differ because the canvas is offset by the canvas area's padding and by the canvas's own
+ * margin (which centers the canvas in the viewport, and leaves room to pan around it), so scroll
+ * position alone doesn't tell you which part of the document is visible.
+ * @returns {{ left: number, top: number }}
+ */
+function canvas_scroll_origin() {
+	// Measure rather than reading the padding, since the canvas's margin is set dynamically.
+	const canvas_rect = main_canvas.getBoundingClientRect();
+	const area = $canvas_area[0];
+	const area_rect = area.getBoundingClientRect();
+	// The canvas area's border is not part of its scrolled contents; its padding is.
+	return {
+		left: canvas_rect.left - (area_rect.left + area.clientLeft) + area.scrollLeft,
+		top: canvas_rect.top - (area_rect.top + area.clientTop) + area.scrollTop,
+	};
+}
 // #endregion
 
 
@@ -451,6 +470,7 @@ export {
 	$G,
 	E,
 	TAU,
+	canvas_scroll_origin,
 	debounce,
 	from_canvas_coords,
 	get_file_extension,

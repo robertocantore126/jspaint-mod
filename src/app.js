@@ -1,7 +1,7 @@
 // @ts-check
 // eslint-disable-next-line no-unused-vars
 /* global airbrush_size:writable, brush_shape:writable, brush_size:writable, button:writable, ctrl:writable, eraser_size:writable, fill_color:writable, pick_color_slot:writable, history_node_to_cancel_to:writable, MenuBar:writable, my_canvas_height:writable, my_canvas_width:writable, palette:writable, pencil_size:writable, pointer:writable, pointer_active:writable, pointer_buttons:writable, pointer_over_canvas:writable, pointer_previous:writable, pointer_start:writable, pointer_type:writable, pointers:writable, reverse:writable, shift:writable, stroke_color:writable, stroke_size:writable, update_helper_layer_on_pointermove_active:writable */
-/* global AccessKeys, current_history_node, default_airbrush_size, default_brush_shape, default_brush_size, default_canvas_height, default_canvas_width, default_eraser_size, default_magnification, default_pencil_size, default_stroke_size, enable_fs_access_api, file_name, get_direction, localize, magnification, main_canvas, main_ctx, return_to_tools, selected_colors, selected_tool, selected_tools, selection, systemHooks, textbox, transparency */
+/* global AccessKeys, current_history_node, default_airbrush_size, default_brush_shape, default_brush_size, default_canvas_height, default_canvas_width, default_eraser_size, default_magnification, default_pencil_size, default_stroke_size, enable_fs_access_api, file_name, get_direction, localize, magnification, main_canvas, main_ctx, minimum_magnification, return_to_tools, selected_colors, selected_tool, selected_tools, selection, systemHooks, textbox, transparency */
 
 import { $ColorBox } from "./$ColorBox.js";
 import { $ToolBox } from "./$ToolBox.js";
@@ -9,9 +9,9 @@ import { Handles } from "./Handles.js";
 // import { get_direction, localize } from "./app-localization.js";
 import { default_palette, get_winter_palette } from "./color-data.js";
 import { image_formats } from "./file-format-data.js";
-import { $this_version_news, cancel, change_some_url_params, change_url_param, clear, confirm_overwrite_capability, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_new, file_open, file_save, file_save_as, get_tool_by_id, get_uris, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, make_or_update_undoable, open_from_file, paste, paste_image_from_file, redo, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, save_as_prompt, select_all, select_tool, select_tools, set_magnification, show_document_history, show_error_message, show_news, show_resource_load_error_message, toggle_grid, undo, update_canvas_rect, update_disable_aa, update_helper_layer, update_magnified_canvas_size, view_bitmap, write_image_file } from "./functions.js";
+import { $this_version_news, cancel, change_some_url_params, change_url_param, clear, confirm_overwrite_capability, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_new, file_open, file_save, file_save_as, get_tool_by_id, get_uris, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, make_or_update_undoable, open_from_file, pan_view_by, paste, paste_image_from_file, redo, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, save_as_prompt, select_all, select_tool, select_tools, set_magnification, show_document_history, show_error_message, show_news, show_resource_load_error_message, toggle_grid, undo, update_canvas_rect, update_canvas_scroll_margins, update_disable_aa, update_helper_layer, update_magnified_canvas_size, view_bitmap, write_image_file } from "./functions.js";
 import { show_help } from "./help.js";
-import { $G, E, TAU, get_file_extension, get_help_folder_icon, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
+import { $G, E, TAU, canvas_scroll_origin, get_file_extension, get_help_folder_icon, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
 import { init_webgl_stuff, rotate } from "./image-manipulation.js";
 import { menus } from "./menus.js";
 import { showMessageBox } from "./msgbox.js";
@@ -490,10 +490,10 @@ const canvas_handles = new Handles({
 	get_rect: () => ({ x: 0, y: 0, width: main_canvas.width, height: main_canvas.height }),
 	set_rect: ({ width, height }) => resize_canvas_and_save_dimensions(width, height),
 	outset: 4,
-	get_handles_offset_left: () => parseFloat($canvas_area.css("padding-left")) + 1,
-	get_handles_offset_top: () => parseFloat($canvas_area.css("padding-top")) + 1,
-	get_ghost_offset_left: () => parseFloat($canvas_area.css("padding-left")) + 1,
-	get_ghost_offset_top: () => parseFloat($canvas_area.css("padding-top")) + 1,
+	get_handles_offset_left: () => canvas_scroll_origin().left + 1,
+	get_handles_offset_top: () => canvas_scroll_origin().top + 1,
+	get_ghost_offset_left: () => canvas_scroll_origin().left + 1,
+	get_ghost_offset_top: () => canvas_scroll_origin().top + 1,
 	size_only: true,
 });
 window.canvas_handles = canvas_handles;
@@ -506,8 +506,6 @@ const $left = $(E("div")).addClass("component-area left").prependTo($H);
 window.$left = $left;
 const $right = $(E("div")).addClass("component-area right").appendTo($H);
 window.$right = $right;
-
-
 // there's also probably a CSS solution alternative to this
 if (get_direction() === "rtl") {
 	$left.appendTo($H);
@@ -795,6 +793,7 @@ $G.on("vertical-color-box-mode-toggled", () => {
 $G.on("resize", () => { // for browser zoom, and in-app zoom of the canvas
 	update_canvas_rect();
 	update_disable_aa();
+	update_canvas_scroll_margins(); // the viewport changed size, so how much margin the canvas needs changed
 	update_helper_layer(); // the zoomed-out view render is at a different scale now
 });
 $canvas_area.on("scroll", () => {
@@ -1228,7 +1227,7 @@ addEventListener("wheel", (e) => {
 				new_magnification = skipped;
 			}
 		}
-		new_magnification = Math.max(0.5, Math.min(new_magnification, 80));
+		new_magnification = Math.max(minimum_magnification, Math.min(new_magnification, 80));
 		set_magnification(new_magnification, to_canvas_coords(e));
 		alt_zooming = e.altKey;
 		return;
@@ -1662,16 +1661,61 @@ $G.on("pointermove", (event) => {
 				new_magnification /= 1.5;
 			}
 		}
-		new_magnification = Math.max(0.5, Math.min(new_magnification, 40));
+		new_magnification = Math.max(minimum_magnification, Math.min(new_magnification, 40));
 		if (new_magnification != magnification) {
 			set_magnification(new_magnification, to_canvas_coords({ clientX: current_pos.x, clientY: current_pos.y }));
 		}
-		const difference_in_x = current_pos.x - pan_last_pos.x;
-		const difference_in_y = current_pos.y - pan_last_pos.y;
-		$canvas_area.scrollLeft($canvas_area.scrollLeft() - difference_in_x);
-		$canvas_area.scrollTop($canvas_area.scrollTop() - difference_in_y);
+		pan_view_by(current_pos.x - pan_last_pos.x, current_pos.y - pan_last_pos.y);
 		pan_last_pos = current_pos;
 	}
+});
+
+// Middle mouse button drags the view around, like in Photoshop, Krita, GIMP, and modern MS Paint.
+// (The left button has to stay free for drawing, and the right button for the secondary color.)
+let pan_pointer_id = null;
+let pan_last_client_position = null;
+let pan_cursor_before = null;
+$canvas_area.on("pointerdown", (event) => {
+	if (event.button !== 1) {
+		return;
+	}
+	// Don't let the browser start its own middle-click autoscroll, and don't let the canvas
+	// start a stroke (it already ignores buttons other than left and right, but be explicit).
+	event.preventDefault();
+	pan_pointer_id = event.pointerId;
+	pan_last_client_position = { x: event.clientX, y: event.clientY };
+	pan_cursor_before = main_canvas.style.cursor;
+	main_canvas.style.cursor = "grabbing";
+	// Keep panning even if the pointer leaves the canvas area (best effort, since the panning
+	// handlers are on the window, and so still receive events while the pointer is in the window)
+	try {
+		$canvas_area[0].setPointerCapture(event.pointerId);
+	} catch {
+		// the pointer must already be up
+	}
+});
+// Chrome's middle-click autoscroll is a mousedown default action
+$canvas_area.on("mousedown", (event) => {
+	if (event.button === 1) {
+		event.preventDefault();
+	}
+});
+$G.on("pointermove", (event) => {
+	if (pan_pointer_id === null || event.pointerId !== pan_pointer_id) {
+		return;
+	}
+	pan_view_by(event.clientX - pan_last_client_position.x, event.clientY - pan_last_client_position.y);
+	pan_last_client_position = { x: event.clientX, y: event.clientY };
+});
+$G.on("pointerup pointercancel", (event) => {
+	if (pan_pointer_id === null || event.pointerId !== pan_pointer_id) {
+		return;
+	}
+	event.preventDefault();
+	pan_pointer_id = null;
+	pan_last_client_position = null;
+	main_canvas.style.cursor = pan_cursor_before;
+	pan_cursor_before = null;
 });
 // #endregion
 

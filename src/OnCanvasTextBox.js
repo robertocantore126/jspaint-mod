@@ -5,7 +5,7 @@ import { $FontBox } from "./$FontBox.js";
 import { Handles } from "./Handles.js";
 import { OnCanvasObject } from "./OnCanvasObject.js";
 import { update_helper_layer } from "./functions.js";
-import { $G, E, get_rgba_from_color, make_canvas, make_css_cursor, to_canvas_coords } from "./helpers.js";
+import { $G, E, canvas_scroll_origin, get_rgba_from_color, make_canvas, make_css_cursor, to_canvas_coords } from "./helpers.js";
 
 class OnCanvasTextBox extends OnCanvasObject {
 	/**
@@ -221,8 +221,8 @@ class OnCanvasTextBox extends OnCanvasObject {
 
 				return { x, y, width, height };
 			},
-			get_ghost_offset_left: () => parseFloat($canvas_area.css("padding-left")) + 1,
-			get_ghost_offset_top: () => parseFloat($canvas_area.css("padding-top")) + 1,
+			get_ghost_offset_left: () => canvas_scroll_origin().left + 1,
+			get_ghost_offset_top: () => canvas_scroll_origin().top + 1,
 		});
 		let mox, moy; // mouse offset
 		const pointermove = (e) => {

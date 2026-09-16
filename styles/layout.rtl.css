@@ -625,6 +625,20 @@ whereas it breaks component docking calculations if used to shift the colors box
 	padding: 3px;
 	direction: ltr;
 }
+/* An empty box, sized by `update_canvas_scroll_margins`, which gives room to center the canvas in
+   the viewport and to pan it around in all directions.
+   The canvas is absolutely positioned, and a box's margins only count towards the scrollable area
+   of a scroll container on the top/left sides, so this box, being in flow, provides the scrollable
+   room on all sides.
+   (It's a pseudo-element so that it can't be hit-tested, and so that other code iterating over the
+   canvas area's children doesn't see it.) */
+.canvas-area::after {
+	content: "";
+	display: block;
+	width: var(--canvas-scroll-space-x, 0px);
+	height: var(--canvas-scroll-space-y, 0px);
+	pointer-events: none;
+}
 .main-canvas {
 	position: absolute;
 	z-index: 2;

@@ -1,6 +1,6 @@
 // @ts-check
 /* global $canvas_area, $status_position, $status_size, canvas_handles, magnification */
-import { $G, E } from "./helpers.js";
+import { $G, E, canvas_scroll_origin } from "./helpers.js";
 
 class OnCanvasObject {
 	/**
@@ -29,8 +29,8 @@ class OnCanvasObject {
 		// const direction = get_direction();
 		// const left_for_ltr = direction === "rtl" ? "right" : "left";
 		// const offset_left = parseFloat($canvas_area.css(`padding-${left_for_ltr}`));
-		const offset_left = parseFloat($canvas_area.css("padding-left"));
-		const offset_top = parseFloat($canvas_area.css("padding-top"));
+		const offset_left = canvas_scroll_origin().left;
+		const offset_top = canvas_scroll_origin().top;
 		this.$el.css({
 			position: "absolute",
 			// [left_for_ltr]: magnification * (direction === "rtl" ? canvas.width - this.width - this.x : this.x) + offset_left,

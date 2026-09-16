@@ -1,7 +1,8 @@
 // @ts-check
-/* global $app, $canvas_area, $status_text, main_canvas, selection */
+/* global $app, $canvas_area, $status_text, magnification, main_canvas, selection */
 
 import { cancel } from "./functions.js";
+import { canvas_scroll_origin } from "./helpers.js";
 
 let seed = 4; // chosen later
 
@@ -187,8 +188,10 @@ export const simulateRandomGesturesPeriodically = () => {
 	let dragSelectionChance = 0.8;
 
 	// scroll randomly absolutely initially so the starting scroll doesn't play into whether a seed reproduces
-	$canvas_area.scrollTop($canvas_area.width() * seededRandom());
-	$canvas_area.scrollLeft($canvas_area.height() * seededRandom());
+	// (scroll to a random point within the canvas, since the canvas can be panned around beyond it)
+	const origin = canvas_scroll_origin();
+	$canvas_area.scrollTop(origin.top + main_canvas.height * magnification * seededRandom());
+	$canvas_area.scrollLeft(origin.left + main_canvas.width * magnification * seededRandom());
 
 	let _simulateRandomGesture = (callback) => {
 		simulateRandomGesture(callback, {

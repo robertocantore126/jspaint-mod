@@ -92,6 +92,12 @@ Editing Features:
 * Keyboard shortcuts for rotation: <kbd>Ctrl+.</kbd> and <kbd>Ctrl+,</kbd> (<kbd><</kbd> and <kbd>></kbd>)
 * Rotate by any arbitrary angle in **Image > Flip/Rotate**
 * In **Image > Stretch/Skew**, you can stretch more than 500% at once
+* Zoom out as far as 10%, like modern MS Paint, to see the whole picture at once
+  (the zoomed-out view is area-averaged, so thin lines stay continuous instead of dropping out;
+  the browser's own scaled-kernel resampling is used for it where it's good enough - checked at
+  runtime - since that's faster on a large image, with an exact fallback otherwise)
+* Selections, text boxes, and tool previews are area-averaged when zoomed out too, so they look the
+  same as the same pixels do as part of the document, and a preview looks like what it will commit
 * Zoom to an arbitrary scale in **View > Zoom > Custom...**
 * Zoom to fit the canvas within the window with **View > Zoom > Zoom To Window**
 * Non-contiguous fill: Replace a color in the entire image by holding <kbd>Shift</kbd> when using the fill tool

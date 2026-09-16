@@ -4,8 +4,8 @@
 import { OnCanvasSelection } from "./OnCanvasSelection.js";
 import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 // import { get_language, localize } from "./app-localization.js";
-import { deselect, get_tool_by_id, meld_selection_into_canvas, meld_textbox_into_canvas, set_magnification, show_error_message, undoable, update_helper_layer } from "./functions.js";
-import { $G, E, get_icon_for_tool, get_icon_for_tools, get_rgba_from_color, make_canvas, make_css_cursor } from "./helpers.js";
+import { deselect, draw_canvas_scaled_down, get_tool_by_id, meld_selection_into_canvas, meld_textbox_into_canvas, set_magnification, show_error_message, undoable, update_helper_layer } from "./functions.js";
+import { $G, E, canvas_scroll_origin, get_icon_for_tool, get_icon_for_tools, get_rgba_from_color, make_canvas, make_css_cursor } from "./helpers.js";
 import { bresenham_dense_line, bresenham_line, copy_contents_within_polygon, draw_bezier_curve, draw_ellipse, draw_fill, draw_line, draw_line_strip, draw_noncontiguous_fill, draw_polygon, draw_quadratic_curve, draw_rounded_rectangle, draw_selection_box, get_circumference_points_for_brush, replace_colors_with_swatch, stamp_brush_canvas, update_brush_for_drawing_lines } from "./image-manipulation.js";
 import { $ChooseShapeStyle, $choose_airbrush_size, $choose_brush, $choose_eraser_size, $choose_magnification, $choose_stroke_size, $choose_transparent_mode } from "./tool-options.js";
 
@@ -269,7 +269,7 @@ const tools = [{
 		ctx.scale(scale, scale);
 		ctx.translate(translate_x, translate_y);
 
-		ctx.drawImage(this.preview_canvas, 0, 0);
+		draw_canvas_scaled_down(ctx, this.preview_canvas, 0, 0);
 	},
 	$options: $choose_transparent_mode,
 }, {
@@ -438,7 +438,7 @@ const tools = [{
 	render_from_mask(ctx, previewing) {
 		ctx.save();
 		ctx.globalCompositeOperation = "destination-out";
-		ctx.drawImage(this.mask_canvas, 0, 0);
+		draw_canvas_scaled_down(ctx, this.mask_canvas, 0, 0);
 		ctx.restore();
 
 		if (previewing || !transparency) {
@@ -466,7 +466,7 @@ const tools = [{
 			}
 			const mask_fill_canvas = make_canvas(this.mask_canvas);
 			replace_colors_with_swatch(mask_fill_canvas.ctx, color, 0, 0);
-			ctx.drawImage(mask_fill_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, mask_fill_canvas, 0, 0);
 		}
 	},
 	pointerup() {
@@ -650,8 +650,10 @@ const tools = [{
 		if (prospective_magnification < magnification) { return; } // hide if would be zooming out
 
 		// prospective viewport size in document coords
-		const w = $canvas_area.width() / prospective_magnification;
-		const h = $canvas_area.height() / prospective_magnification;
+		// (clientWidth/Height, since padding and scrollbars mean the content box size is not the
+		// viewport size)
+		const w = $canvas_area[0].clientWidth / prospective_magnification;
+		const h = $canvas_area[0].clientHeight / prospective_magnification;
 
 		let rect_x1 = ~~(x - w / 2);
 		let rect_y1 = ~~(y - h / 2);
@@ -722,20 +724,13 @@ const tools = [{
 		set_magnification(prospective_magnification);
 
 		if (magnification > prev_magnification) {
-
-			// (new) viewport size in document coords
-			const w = $canvas_area.width() / magnification;
-			const h = $canvas_area.height() / magnification;
-
-			$canvas_area.scrollLeft((x - w / 2) * magnification / prev_magnification);
-			// Nevermind, canvas, isn't aligned to the right in RTL layout!
-			// if (get_direction() === "rtl") {
-			// 	// scrollLeft coordinates can be negative for RTL
-			// 	$canvas_area.scrollLeft((x - w/2 - canvas.width) * magnification / prev_magnification + $canvas_area.innerWidth());
-			// } else {
-			// 	$canvas_area.scrollLeft((x - w/2) * magnification / prev_magnification);
-			// }
-			$canvas_area.scrollTop((y - h / 2) * magnification / prev_magnification);
+			// Center the view on the point that was clicked, now that we've zoomed in on it.
+			// (Scroll the document point to the center of the viewport.)
+			const origin = canvas_scroll_origin();
+			const clientWidth = $canvas_area[0].clientWidth;
+			const clientHeight = $canvas_area[0].clientHeight;
+			$canvas_area[0].scrollLeft = origin.left + x * magnification - clientWidth / 2;
+			$canvas_area[0].scrollTop = origin.top + y * magnification - clientHeight / 2;
 			$canvas_area.trigger("scroll");
 		}
 	},
@@ -931,7 +926,7 @@ const tools = [{
 		ctx.translate(translate_x, translate_y);
 
 		if (this.points.length >= 1) {
-			ctx.drawImage(this.preview_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, this.preview_canvas, 0, 0);
 		}
 	},
 	cancel() {
@@ -1112,7 +1107,7 @@ const tools = [{
 		ctx.scale(scale, scale);
 		ctx.translate(translate_x, translate_y);
 
-		ctx.drawImage(this.preview_canvas, 0, 0);
+		draw_canvas_scaled_down(ctx, this.preview_canvas, 0, 0);
 	},
 	complete(ctx) {
 		if (this.points.length >= 3) {
@@ -1331,7 +1326,7 @@ tools.forEach((tool) => {
 			ctx.translate(translate_x, translate_y);
 
 			// make the document canvas part of the helper canvas so that inversion can apply to it
-			ctx.drawImage(main_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, main_canvas, 0, 0);
 		};
 		tool.drawPreviewAboveGrid = (ctx, _x, _y, _grid_visible, scale, translate_x, translate_y) => {
 			if (!pointer_active) { return; }
@@ -1373,7 +1368,7 @@ tools.forEach((tool) => {
 			ctx.scale(scale, scale);
 			ctx.translate(translate_x, translate_y);
 
-			ctx.drawImage(tool.shape_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, tool.shape_canvas, 0, 0);
 		};
 	}
 	if (tool.paint_mask) {
@@ -1419,7 +1414,7 @@ tools.forEach((tool) => {
 		tool.render_from_mask = (ctx, previewing) => { // could be private
 			ctx.save();
 			ctx.globalCompositeOperation = "destination-out";
-			ctx.drawImage(tool.mask_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, tool.mask_canvas, 0, 0);
 			ctx.restore();
 
 			/** @type {string | CanvasGradient | CanvasPattern} */
@@ -1452,7 +1447,7 @@ tools.forEach((tool) => {
 			// @TODO: perf: keep this canvas around too
 			const mask_fill_canvas = make_canvas(tool.mask_canvas);
 			replace_colors_with_swatch(mask_fill_canvas.ctx, color, 0, 0);
-			ctx.drawImage(mask_fill_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, mask_fill_canvas, 0, 0);
 			return translucent;
 		};
 		tool.drawPreviewUnderGrid = (ctx, _x, _y, _grid_visible, scale, translate_x, translate_y) => {
@@ -1527,7 +1522,7 @@ tools.forEach((tool) => {
 		tool.render_from_mask = (ctx, previewing) => { // could be private
 			ctx.save();
 			ctx.globalCompositeOperation = "destination-out";
-			ctx.drawImage(tool.mask_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, tool.mask_canvas, 0, 0);
 			ctx.restore();
 
 			/** @type {string | CanvasGradient | CanvasPattern} */
@@ -1566,7 +1561,7 @@ tools.forEach((tool) => {
 				stamp_brush_canvas(mask_fill_canvas.ctx, pointer.x, pointer.y, brush.shape, brush.size);
 			}
 			replace_colors_with_swatch(mask_fill_canvas.ctx, color, 0, 0);
-			ctx.drawImage(mask_fill_canvas, 0, 0);
+			draw_canvas_scaled_down(ctx, mask_fill_canvas, 0, 0);
 			return translucent;
 		};
 		tool.drawPreviewUnderGrid = (ctx, _x, _y, _grid_visible, scale, translate_x, translate_y) => {

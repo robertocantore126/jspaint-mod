@@ -3,7 +3,7 @@
 import { Handles } from "./Handles.js";
 import { OnCanvasObject } from "./OnCanvasObject.js";
 import { get_tool_by_id, make_or_update_undoable, undoable, update_helper_layer } from "./functions.js";
-import { $G, get_icon_for_tool, get_rgba_from_color, make_canvas, make_css_cursor, to_canvas_coords } from "./helpers.js";
+import { $G, canvas_scroll_origin, get_icon_for_tool, get_rgba_from_color, make_canvas, make_css_cursor, to_canvas_coords } from "./helpers.js";
 import { replace_colors_with_swatch } from "./image-manipulation.js";
 import { TOOL_SELECT } from "./tools.js";
 
@@ -92,8 +92,8 @@ class OnCanvasSelection extends OnCanvasObject {
 						this.resize();
 					});
 				},
-				get_ghost_offset_left: () => parseFloat($canvas_area.css("padding-left")) + 1,
-				get_ghost_offset_top: () => parseFloat($canvas_area.css("padding-top")) + 1,
+				get_ghost_offset_left: () => canvas_scroll_origin().left + 1,
+				get_ghost_offset_top: () => canvas_scroll_origin().top + 1,
 			});
 			let mox, moy;
 			const pointermove = (e) => {

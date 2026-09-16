@@ -1,7 +1,7 @@
 // @ts-check
 // eslint-disable-next-line no-unused-vars
 /* global $thumbnail_window:writable, canvas_bounding_client_rect:writable, current_history_node:writable, file_format:writable, file_name:writable, helper_layer:writable, history_node_to_cancel_to:writable, magnification:writable, monochrome:writable, palette:writable, pointer:writable, return_to_magnification:writable, return_to_tools:writable, root_history_node:writable, saved:writable, selected_colors:writable, selected_tool:writable, selected_tools:writable, selection:writable, show_grid:writable, show_thumbnail:writable, system_file_handle:writable, textbox:writable, thumbnail_canvas:writable, tool_transparent_mode:writable, transparency:writable, undos:writable */
-/* global $canvas, $canvas_area, $colorbox, $status_text, $toolbox, $Window, AccessKeys, applyCSSProperties, decodeBMP, default_canvas_height, default_canvas_width, default_magnification, default_tool, enable_palette_loading_from_indexed_images, encodeBMP, localize, main_canvas, main_ctx, monochrome_palette, my_canvas_height, my_canvas_width, new_local_session, parseThemeFileString, pointer_active, pointers, polychrome_palette, redos, systemHooks, text_tool_font, update_fill_and_stroke_colors_and_lineWidth, UPNG, UTIF */
+/* global $canvas, $canvas_area, $colorbox, $status_text, $toolbox, $Window, AccessKeys, applyCSSProperties, decodeBMP, default_canvas_height, default_canvas_width, default_magnification, default_tool, enable_palette_loading_from_indexed_images, encodeBMP, localize, main_canvas, main_ctx, minimum_magnification, monochrome_palette, my_canvas_height, my_canvas_width, new_local_session, parseThemeFileString, pointer_active, pointers, polychrome_palette, redos, systemHooks, text_tool_font, update_fill_and_stroke_colors_and_lineWidth, UPNG, UTIF */
 
 import { $DialogWindow } from "./$ToolWindow.js";
 import { OnCanvasHelperLayer } from "./OnCanvasHelperLayer.js";
@@ -10,7 +10,7 @@ import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 // import { localize } from "./app-localization.js";
 import { default_palette } from "./color-data.js";
 import { image_formats } from "./file-format-data.js";
-import { $G, E, TAU, debounce, from_canvas_coords, get_help_folder_icon, get_icon_for_tool, get_rgba_from_color, is_discord_embed, is_pride_month, make_canvas, render_access_key, to_canvas_coords } from "./helpers.js";
+import { $G, E, TAU, canvas_scroll_origin, debounce, from_canvas_coords, get_help_folder_icon, get_icon_for_tool, get_rgba_from_color, is_discord_embed, is_pride_month, make_canvas, render_access_key, to_canvas_coords } from "./helpers.js";
 import { apply_image_transformation, draw_grid, draw_selection_box, flip_horizontal, flip_vertical, invert_monochrome, invert_rgb, rotate, stretch_and_skew, threshold_black_and_white } from "./image-manipulation.js";
 import { show_imgur_uploader } from "./imgur.js";
 import { showMessageBox } from "./msgbox.js";
@@ -150,7 +150,126 @@ function update_magnified_canvas_size() {
 	$canvas.css("width", main_canvas.width * magnification);
 	$canvas.css("height", main_canvas.height * magnification);
 
+	update_canvas_scroll_margins();
+
 	update_canvas_rect();
+}
+
+/**
+ * The document coordinates of the top-left corner of the visible viewport.
+ * Can be negative, since the canvas can be panned around and the viewport can show space
+ * around the document, not just the document itself.
+ * @returns {{ x: number, y: number }}
+ */
+function viewport_origin() {
+	const origin = canvas_scroll_origin();
+	return {
+		x: ($canvas_area[0].scrollLeft - origin.left) / magnification,
+		y: ($canvas_area[0].scrollTop - origin.top) / magnification,
+	};
+}
+
+/**
+ * Pan the view by a screen-space offset, in CSS pixels.
+ * @param {number} dx
+ * @param {number} dy
+ */
+function pan_view_by(dx, dy) {
+	$canvas_area[0].scrollLeft -= dx;
+	$canvas_area[0].scrollTop -= dy;
+}
+
+/**
+ * Margin around the canvas within the canvas area, giving room to center it in the viewport and to
+ * drag it around in all directions, as in modern MS Paint.
+ * Without a margin, a canvas smaller than the viewport has nothing to scroll, and so sits stuck in
+ * the top-left corner.
+ * Half a viewport of slack past each edge (along with centering the canvas whenever it fits) is
+ * enough to drag the canvas right out to the edges of the viewport, while keeping the empty space
+ * around a big canvas bounded, since otherwise it would scale up with the canvas, and you could pan
+ * off into nothingness for a long way.
+ * @param {number} viewport_size
+ * @param {number} canvas_size
+ * @returns {number}
+ */
+function canvas_scroll_margin_for(viewport_size, canvas_size) {
+	return Math.max(0, (viewport_size - canvas_size) / 2) + viewport_size / 2;
+}
+
+/**
+ * The canvas's size on screen when the scroll margins were last set.
+ * Used to tell a change to the canvas (zooming, resizing the image, opening a document) apart from
+ * a change to the viewport, since the canvas gets centered whenever it fits, and that would
+ * otherwise undo panning on every window resize.
+ * @type {{ width: number, height: number } | null}
+ */
+let canvas_size_when_margins_were_last_set = null;
+
+/**
+ * Put a margin around the canvas, so it can be centered in the viewport, and panned around freely.
+ * When the canvas changes size, and fits in the viewport, it's centered; otherwise the scroll
+ * position is adjusted so that the same part of the document stays in the center of the view,
+ * leaving the canvas where the user put it.
+ */
+function update_canvas_scroll_margins() {
+	const area = $canvas_area[0];
+	const origin_before = canvas_scroll_origin();
+	const center_before = {
+		x: (area.scrollLeft + area.clientWidth / 2 - origin_before.left) / magnification,
+		y: (area.scrollTop + area.clientHeight / 2 - origin_before.top) / magnification,
+	};
+
+	/**
+	 * The canvas's top-left corner within the canvas area's scrolled contents, as it would be without
+	 * a margin (the canvas area's padding is all that comes before the canvas).
+	 * @returns {{ left: number, top: number }}
+	 */
+	const position_without_margin = () => ({
+		left: parseFloat($canvas_area.css("padding-left")) || 0,
+		top: parseFloat($canvas_area.css("padding-top")) || 0,
+	});
+
+	/**
+	 * @returns {{ margin_x: number, margin_y: number }}
+	 */
+	const set_margins = () => {
+		const margin_x = canvas_scroll_margin_for(area.clientWidth, main_canvas.width * magnification);
+		const margin_y = canvas_scroll_margin_for(area.clientHeight, main_canvas.height * magnification);
+		$canvas.css({
+			marginLeft: margin_x,
+			marginRight: margin_x,
+			marginTop: margin_y,
+			marginBottom: margin_y,
+		});
+		// The canvas is absolutely positioned, and margins only count towards the scrollable area of
+		// the canvas area on the top/left sides, so this box (see the ::after rule in layout.css)
+		// provides the room to pan around on all sides.
+		area.style.setProperty("--canvas-scroll-space-x", `${margin_x * 2 + main_canvas.width * magnification}px`);
+		area.style.setProperty("--canvas-scroll-space-y", `${margin_y * 2 + main_canvas.height * magnification}px`);
+		return { margin_x, margin_y };
+	};
+
+	// The margins make the canvas area scrollable if it wasn't already, and non-overlay scrollbars
+	// take space away from the viewport, so the margins need recomputing afterwards. (Overlay
+	// scrollbars don't, but recomputing is harmless, so this settles either way.)
+	set_margins();
+	const { margin_x, margin_y } = set_margins();
+
+	// Center the canvas along each axis that it fits along, and otherwise keep the view centered on
+	// the same part of the document.
+	const canvas_width = main_canvas.width * magnification;
+	const canvas_height = main_canvas.height * magnification;
+	const canvas_changed = canvas_size_when_margins_were_last_set === null ||
+		canvas_width !== canvas_size_when_margins_were_last_set.width ||
+		canvas_height !== canvas_size_when_margins_were_last_set.height;
+	canvas_size_when_margins_were_last_set = { width: canvas_width, height: canvas_height };
+	const offset = position_without_margin();
+	area.scrollLeft = canvas_changed && canvas_width <= area.clientWidth ?
+		offset.left + margin_x + canvas_width / 2 - area.clientWidth / 2 :
+		offset.left + margin_x + center_before.x * magnification - area.clientWidth / 2;
+	area.scrollTop = canvas_changed && canvas_height <= area.clientHeight ?
+		offset.top + margin_y + canvas_height / 2 - area.clientHeight / 2 :
+		offset.top + margin_y + center_before.y * magnification - area.clientHeight / 2;
 }
 
 function update_canvas_rect() {
@@ -203,16 +322,15 @@ function update_helper_layer_immediately() {
 	}
 
 	const margin = 15;
-	const viewport_x = Math.floor(Math.max($canvas_area.scrollLeft() / magnification - margin, 0));
-	// Nevermind, canvas, isn't aligned to the right in RTL layout!
-	// const viewport_x =
-	// 	get_direction() === "rtl" ?
-	// 		// Note: $canvas_area.scrollLeft() can return negative numbers for RTL layout
-	// 		Math.floor(Math.max(($canvas_area.scrollLeft() - $canvas_area.innerWidth()) / magnification + canvas.width - margin, 0)) :
-	// 		Math.floor(Math.max($canvas_area.scrollLeft() / magnification - margin, 0));
-	const viewport_y = Math.floor(Math.max($canvas_area.scrollTop() / magnification - margin, 0));
-	const viewport_x2 = Math.floor(Math.min(viewport_x + $canvas_area.width() / magnification + margin * 2, main_canvas.width));
-	const viewport_y2 = Math.floor(Math.min(viewport_y + $canvas_area.height() / magnification + margin * 2, main_canvas.height));
+	// Note: the viewport origin is the top-left of the *visible viewport*, which is not necessarily
+	// inside the document: the canvas can be centered with space around it, or panned partway out of view.
+	const viewport = viewport_origin();
+	const viewport_x = Math.floor(Math.max(viewport.x - margin, 0));
+	const viewport_y = Math.floor(Math.max(viewport.y - margin, 0));
+	// (using clientWidth/Height rather than width()/height(), since padding and scrollbars mean the
+	// content box size is not the viewport size)
+	const viewport_x2 = Math.floor(Math.min(viewport.x + $canvas_area[0].clientWidth / magnification + margin * 2, main_canvas.width));
+	const viewport_y2 = Math.floor(Math.min(viewport.y + $canvas_area[0].clientHeight / magnification + margin * 2, main_canvas.height));
 	const viewport_width = viewport_x2 - viewport_x;
 	const viewport_height = viewport_y2 - viewport_y;
 	const resolution_width = viewport_width * scale;
@@ -246,23 +364,10 @@ function update_helper_layer_immediately() {
 		// const scroll_width = $canvas_area[0].scrollWidth - $canvas_area[0].clientWidth;
 		// const scroll_height = $canvas_area[0].scrollHeight - $canvas_area[0].clientHeight;
 
-		// These padding terms are negligible in comparison to the margin reserved for canvas handles,
-		// which I'm not accounting for (except for clamping below).
-		const padding_left = parseFloat($canvas_area.css("padding-left"));
-		const padding_top = parseFloat($canvas_area.css("padding-top"));
-		const scroll_width = main_canvas.clientWidth + padding_left - $canvas_area[0].clientWidth;
-		const scroll_height = main_canvas.clientHeight + padding_top - $canvas_area[0].clientHeight;
-		// Don't divide by less than one, or the thumbnail with disappear off to the top/left (or completely for NaN).
-		let scroll_x_fraction = $canvas_area[0].scrollLeft / Math.max(1, scroll_width);
-		let scroll_y_fraction = $canvas_area[0].scrollTop / Math.max(1, scroll_height);
-		// If the canvas is larger than the document view, but not by much, and you scroll to the bottom or right,
-		// the margin for the canvas handles can lead to the thumbnail being cut off or even showing
-		// just blank space without this clamping (due to the not quite accurate scrollable area calculation).
-		scroll_x_fraction = Math.min(scroll_x_fraction, 1);
-		scroll_y_fraction = Math.min(scroll_y_fraction, 1);
-
-		let viewport_x = Math.floor(Math.max(scroll_x_fraction * (main_canvas.width - thumbnail_canvas.width), 0));
-		let viewport_y = Math.floor(Math.max(scroll_y_fraction * (main_canvas.height - thumbnail_canvas.height), 0));
+		// Show the thumbnail's crop starting at the top-left of the visible viewport.
+		const viewport = viewport_origin();
+		const viewport_x = Math.floor(Math.min(Math.max(viewport.x, 0), Math.max(main_canvas.width - thumbnail_canvas.width, 0)));
+		const viewport_y = Math.floor(Math.min(Math.max(viewport.y, 0), Math.max(main_canvas.height - thumbnail_canvas.height, 0)));
 
 		render_canvas_view(thumbnail_canvas, 1, viewport_x, viewport_y, false); // devicePixelRatio?
 	}
@@ -288,17 +393,87 @@ function get_downscale_scratch_canvas(index, width, height) {
 }
 
 /**
- * Draw a region of a canvas, scaled down, averaging the whole footprint of each source pixel.
+ * Whether the browser's own downscaling can be relied on to keep thin lines visible, determined
+ * once, by `test_native_downscaling`.
+ * @type {boolean | undefined}
+ */
+let native_downscaling_is_trustworthy;
+
+/**
+ * Check whether a scaled-down `drawImage` does a proper resampling for the reduction factor.
  *
- * A single `drawImage` can't do this: the browser's scaling is a bilinear approximation that only
- * considers a couple of source pixels per output pixel. When scaling down, a 1px line (as in pixel
- * art) can therefore slip between the samples, coming out faint and broken up into dots, which is
- * especially noticeable with a diagonal line, when the zoom level isn't a whole fraction.
- * Halving the image repeatedly instead makes every source pixel contribute, because each 2:1 step
- * averages exactly 2x2 source pixels. That's the same idea as a mipmap, and it gives the look of
- * MS Paint zoomed out: thin lines stay continuous, and get grainy/blurry rather than disappearing.
- * The result is then scaled from the last halving step (at most 1.5x, so barely blurrier) to the
- * exact target size.
+ * This is what tells the fast path in `draw_canvas_downscaled` apart from the filter in the browser
+ * that drops thin lines - Chrome's default and "low" quality only look at the 2x2 neighborhood of
+ * each output pixel, which loses a 1px line almost entirely at 8x reduction, whatever the zoom.
+ * Chrome's "medium" and "high" scale the kernel for the reduction (like a mipmap, which is also
+ * why they're cheap), and stay continuous. The check is a synthetic 1px diagonal at 8x reduction -
+ * a line that a 2x2 filter drops - and it costs well under a millisecond, once.
+ * @returns {boolean}
+ */
+function test_native_downscaling() {
+	const size = 128;
+	const reduction = 8;
+	const source = make_canvas(size, size);
+	source.ctx.fillStyle = "#000";
+	for (let i = 0; i < size; i++) {
+		source.ctx.fillRect(i, i, 1, 1);
+	}
+	const target = make_canvas(size / reduction, size / reduction);
+	target.ctx.imageSmoothingEnabled = true;
+	target.ctx.imageSmoothingQuality = "medium";
+	target.ctx.drawImage(source, 0, 0, size, size, 0, 0, target.width, target.height);
+	const data = target.ctx.getImageData(0, 0, target.width, target.height).data;
+	// Each output pixel covers 8x8 source pixels, of which a diagonal line passes through 8,
+	// so a correct resampling gives every pixel along the line around 1/8 of full opacity.
+	// If the line is lost anywhere, this browser's scaling is not usable for zooming out.
+	const minimum_coverage = 255 / reduction / 2;
+	for (let i = 0; i < target.width; i++) {
+		let darkest_in_column = 0;
+		let darkest_in_row = 0;
+		for (let j = 0; j < target.height; j++) {
+			darkest_in_column = Math.max(darkest_in_column, data[(j * target.width + i) * 4 + 3]);
+			darkest_in_row = Math.max(darkest_in_row, data[(i * target.width + j) * 4 + 3]);
+		}
+		if (darkest_in_column < minimum_coverage || darkest_in_row < minimum_coverage) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * @returns {boolean}
+ */
+function can_use_native_downscaling() {
+	if (native_downscaling_is_trustworthy === undefined) {
+		native_downscaling_is_trustworthy = test_native_downscaling();
+	}
+	return native_downscaling_is_trustworthy;
+}
+
+/**
+ * Draw a region of a canvas, scaled down, averaging the whole footprint of each source pixel
+ * (area resampling, a.k.a. a box filter).
+ *
+ * A single default `drawImage` can't do this: the browser's scaling is a bilinear approximation that
+ * only considers a couple of source pixels per output pixel. When scaling down, a 1px line (as in
+ * pixel art) can therefore slip between the samples, coming out faint and broken up into dots, which
+ * is especially noticeable with a diagonal line, when the zoom level isn't a whole fraction. Averaging
+ * the full footprint instead makes every source pixel contribute, so a thin line keeps its whole
+ * darkness and stays continuous however far out you zoom - which is the look of MS Paint.
+ *
+ * Browsers that scale the resampling kernel for the reduction factor (checked by
+ * `can_use_native_downscaling`) do that themselves, in one `drawImage`, on the GPU. That is what this
+ * does when it can, both because it's much faster (no per-pixel JavaScript, and no readback of the
+ * image to the CPU) and because the kernel is at least as good: measured on a 1px line at 1/3 zoom,
+ * the exact box filter leaves the faintest point of the line at 1/255 opacity, where Chrome's
+ * "medium" quality keeps it at 32/255.
+ *
+ * Otherwise, it does the resampling itself: an exact box filter in JavaScript costs about one read
+ * per source pixel, so it's only applied to the last stretch of the reduction, getting within 4x of
+ * the target by halving repeatedly first (each 2:1 halving averages exactly 2x2 pixels, and the GPU
+ * does it), which bounds the JavaScript work to a few times the size of the viewport, no matter how
+ * big the document is.
  * @param {CanvasRenderingContext2D} ctx - the destination context, already sized for the target
  * @param {HTMLCanvasElement | PixelCanvas} source - the document canvas
  * @param {number} source_x
@@ -309,6 +484,19 @@ function get_downscale_scratch_canvas(index, width, height) {
  * @param {number} target_height
  */
 function draw_canvas_downscaled(ctx, source, source_x, source_y, source_width, source_height, target_width, target_height) {
+	if (can_use_native_downscaling()) {
+		const previous_smoothing = ctx.imageSmoothingEnabled;
+		const previous_quality = ctx.imageSmoothingQuality;
+		// Clear first, so the result replaces what's there rather than blending with it, matching the
+		// `putImageData` of the resampling done below (the destination may be a reused scratch canvas).
+		ctx.clearRect(0, 0, target_width, target_height);
+		ctx.imageSmoothingEnabled = true;
+		ctx.imageSmoothingQuality = "medium";
+		ctx.drawImage(source, source_x, source_y, source_width, source_height, 0, 0, target_width, target_height);
+		ctx.imageSmoothingEnabled = previous_smoothing;
+		ctx.imageSmoothingQuality = previous_quality;
+		return;
+	}
 	// @ts-ignore - TypeScript doesn't like reassigning a union type like this
 	let image = source;
 	let x = source_x;
@@ -317,7 +505,7 @@ function draw_canvas_downscaled(ctx, source, source_x, source_y, source_width, s
 	let height = source_height;
 	let iteration = 0;
 	// Halve while the remaining reduction is still substantial
-	while (width > target_width * 1.5 && height > target_height * 1.5) {
+	while (width > target_width * 4 && height > target_height * 4) {
 		const half_width = Math.max(1, Math.round(width / 2));
 		const half_height = Math.max(1, Math.round(height / 2));
 		const half = get_downscale_scratch_canvas(iteration++ % 2, half_width, half_height);
@@ -331,8 +519,140 @@ function draw_canvas_downscaled(ctx, source, source_x, source_y, source_width, s
 		width = half_width;
 		height = half_height;
 	}
-	ctx.imageSmoothingEnabled = true;
-	ctx.drawImage(image, x, y, width, height, 0, 0, target_width, target_height);
+
+	// The rest of the reduction, exactly, one pass over the source pixels.
+	// (The read region gets rounded off by `getImageData`, so the returned image's own dimensions are
+	// used below, rather than the requested size, which would throw off the row stride.)
+	// @ts-ignore - PixelCanvas has a `.ctx`, a plain canvas element doesn't
+	const source_image_data = (image.ctx ?? image.getContext("2d")).getImageData(x, y, width, height);
+	const source_data = source_image_data.data;
+	const read_width = source_image_data.width;
+	const read_height = source_image_data.height;
+	const out_data = ctx.createImageData(target_width, target_height);
+	const scale_x = read_width / target_width;
+	const scale_y = read_height / target_height;
+	for (let target_y = 0; target_y < target_height; target_y++) {
+		const source_y0 = target_y * scale_y;
+		const source_y1 = source_y0 + scale_y;
+		const y_from = Math.floor(source_y0);
+		const y_to = Math.min(Math.ceil(source_y1), read_height);
+		for (let target_x = 0; target_x < target_width; target_x++) {
+			const source_x0 = target_x * scale_x;
+			const source_x1 = source_x0 + scale_x;
+			const x_from = Math.floor(source_x0);
+			const x_to = Math.min(Math.ceil(source_x1), read_width);
+			// Average premultiplied, so that transparent pixels don't darken their neighbors.
+			let red = 0, green = 0, blue = 0, alpha = 0, total = 0;
+			for (let sy = y_from; sy < y_to; sy++) {
+				const weight_y = Math.min(sy + 1, source_y1) - Math.max(sy, source_y0);
+				const row = sy * read_width;
+				for (let sx = x_from; sx < x_to; sx++) {
+					const weight = weight_y * (Math.min(sx + 1, source_x1) - Math.max(sx, source_x0));
+					const i = (row + sx) * 4;
+					const a = source_data[i + 3] / 255 * weight;
+					red += source_data[i] * a;
+					green += source_data[i + 1] * a;
+					blue += source_data[i + 2] * a;
+					alpha += source_data[i + 3] * weight;
+					total += weight;
+				}
+			}
+			const o = (target_y * target_width + target_x) * 4;
+			const average_alpha = alpha / total;
+			const unpremultiply = average_alpha > 0 ? 255 / alpha : 0;
+			out_data.data[o] = red * unpremultiply;
+			out_data.data[o + 1] = green * unpremultiply;
+			out_data.data[o + 2] = blue * unpremultiply;
+			out_data.data[o + 3] = average_alpha;
+		}
+	}
+	ctx.putImageData(out_data, 0, 0);
+}
+
+/** Reusable canvas holding the result of `draw_canvas_downscaled`, for compositing it rather than writing it directly. */
+let downscale_result_canvas;
+/**
+ * @param {number} width
+ * @param {number} height
+ * @returns {PixelCanvas}
+ */
+function get_downscale_result_canvas(width, height) {
+	if (!downscale_result_canvas) {
+		downscale_result_canvas = make_canvas(width, height);
+	} else if (downscale_result_canvas.width !== width || downscale_result_canvas.height !== height) {
+		downscale_result_canvas.width = width;
+		downscale_result_canvas.height = height;
+	}
+	return downscale_result_canvas;
+}
+
+/**
+ * Draw a document-scale canvas - a selection's or text box's contents, or a tool's preview canvas -
+ * into the view, resampling the same way the document itself is drawn when zoomed out: averaging
+ * the whole footprint of each source pixel. (See `draw_canvas_downscaled`.)
+ *
+ * A plain `drawImage` under a scaled transform uses the browser's bilinear resampling, which only
+ * looks at a couple of source pixels per output pixel, so when the view is zoomed out, thin lines
+ * slip between those samples and come out as dots and dashes at varying darkness - content visibly
+ * falls apart as you zoom out. Overlay content should get the same treatment as the document, so
+ * that a selection looks the same as those pixels do as part of the document, and a preview looks
+ * the same as the stroke it goes on to commit.
+ *
+ * The context is expected to already have the view transform applied (`ctx.scale(scale, scale)` and
+ * `ctx.translate(translate_x, translate_y)`, as the previews and the selection drawing set up), on
+ * top of the identity - which is the base transform for both the helper layer and the thumbnail.
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {HTMLCanvasElement | PixelCanvas} source - a document-scale canvas, drawn whole
+ * @param {number} dest_x - where its top-left corner goes, in document coordinates
+ * @param {number} dest_y
+ */
+function draw_canvas_scaled_down(ctx, source, dest_x, dest_y) {
+	// Read the view transform back out of the context: the callers have already applied it, and most
+	// of them don't have the scale and translation to hand (the previews get them, but the mask
+	// rendering they call into doesn't).
+	const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+	const scale = transform && transform.a;
+	// Only a plain uniform scale and translation is expected; no rotation, skew, or flip. Anything
+	// else (and zooming in, where the browser's resampling is what you want, so that a preview lines
+	// up with the canvas pixels exactly) is left to a plain drawImage.
+	if (!scale || scale >= 1 || transform.b !== 0 || transform.c !== 0 || transform.d !== scale) {
+		ctx.drawImage(source, dest_x, dest_y);
+		return;
+	}
+	// Work out the part of the source that can land in the destination in terms of *destination*
+	// pixels, so that the sampling comes out aligned with how the document itself is drawn: the same
+	// source pixels average into the same destination pixels either way, and a selection doesn't look
+	// slightly different from those pixels as part of the document. The transform maps document
+	// coordinates to destination pixels as `doc * scale + transform.e` (and `f` vertically).
+	const device_x1 = Math.max(0, Math.ceil(dest_x * scale + transform.e));
+	const device_y1 = Math.max(0, Math.ceil(dest_y * scale + transform.f));
+	const device_x2 = Math.min(ctx.canvas.width, Math.floor((dest_x + source.width) * scale + transform.e));
+	const device_y2 = Math.min(ctx.canvas.height, Math.floor((dest_y + source.height) * scale + transform.f));
+	const target_width = device_x2 - device_x1;
+	const target_height = device_y2 - device_y1;
+	if (target_width < 1 || target_height < 1) { return; }
+	// The same region, in source canvas coordinates, rounded outwards to whole pixels (covering every
+	// pixel that the destination range can be pulling from)
+	const region_x = Math.max(0, Math.floor((device_x1 - transform.e) / scale - dest_x));
+	const region_y = Math.max(0, Math.floor((device_y1 - transform.f) / scale - dest_y));
+	const region_x2 = Math.min(source.width, Math.ceil((device_x2 - transform.e) / scale - dest_x));
+	const region_y2 = Math.min(source.height, Math.ceil((device_y2 - transform.f) / scale - dest_y));
+	const region_width = region_x2 - region_x;
+	const region_height = region_y2 - region_y;
+	if (region_width < 1 || region_height < 1) { return; }
+	const downscaled = get_downscale_result_canvas(target_width, target_height);
+	draw_canvas_downscaled(
+		downscaled.ctx, source,
+		region_x, region_y, region_width, region_height,
+		target_width, target_height
+	);
+	// The result is already at display resolution and aligned to the destination's pixels, so draw it
+	// 1:1, bypassing the scaled transform (and without a fractional offset, which the context would
+	// resample all over again, since it's set up for interpolating scaled-down images).
+	ctx.save();
+	ctx.setTransform(1, 0, 0, 1, 0, 0);
+	ctx.drawImage(downscaled, device_x1, device_y1);
+	ctx.restore();
 }
 
 /**
@@ -431,7 +751,7 @@ function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_la
 		hctx.scale(scale, scale);
 		hctx.translate(-viewport_x, -viewport_y);
 
-		hctx.drawImage(selection.canvas, selection.x, selection.y);
+		draw_canvas_scaled_down(hctx, selection.canvas, selection.x, selection.y);
 
 		hctx.restore();
 
@@ -448,7 +768,7 @@ function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_la
 		hctx.scale(scale, scale);
 		hctx.translate(-viewport_x, -viewport_y);
 
-		hctx.drawImage(textbox.canvas, textbox.x, textbox.y);
+		draw_canvas_scaled_down(hctx, textbox.canvas, textbox.x, textbox.y);
 
 		hctx.restore();
 
@@ -493,13 +813,20 @@ function update_disable_aa() {
  * @param {{x: number, y: number}} [anchor_point] - uses canvas coordinates; default is the top-left of the $canvas_area viewport
  */
 function set_magnification(new_scale, anchor_point) {
+	// Clamp here as well as at the call sites, so that everything (wheel, pinch, menu items, the
+	// Custom Zoom dialog, and zoom-to-fit) agrees on how far out you can zoom.
+	new_scale = Math.max(minimum_magnification, new_scale);
+
 	// How this works is, you imagine "what if it was zoomed, where would the anchor point be?"
 	// Then to make it end up where it started, you simply shift the viewport by the difference.
 	// And actually you don't have to "imagine" zooming, you can just do the zoom.
 
+	// By default, zoom around the center of the view, so zooming (with the menu, keyboard, or the
+	// Magnifier tool) keeps what you're looking at in view, and re-centers the canvas as it fits.
+	const viewport = viewport_origin();
 	anchor_point = anchor_point ?? {
-		x: $canvas_area.scrollLeft() / magnification,
-		y: $canvas_area.scrollTop() / magnification,
+		x: viewport.x + $canvas_area[0].clientWidth / magnification / 2,
+		y: viewport.y + $canvas_area[0].clientHeight / magnification / 2,
 	};
 	const anchor_on_page = from_canvas_coords(anchor_point);
 
@@ -509,13 +836,24 @@ function set_magnification(new_scale, anchor_point) {
 	}
 	update_magnified_canvas_size(); // also updates canvas_bounding_client_rect used by from_canvas_coords()
 
-	const anchor_after_zoom = from_canvas_coords(anchor_point);
-	// Note: scrollBy() not scrollTo()
-	$canvas_area[0].scrollBy({
-		left: anchor_after_zoom.clientX - anchor_on_page.clientX,
-		top: anchor_after_zoom.clientY - anchor_on_page.clientY,
-		behavior: "instant",
-	});
+	// Anchor on each axis where the canvas overflows the viewport, and leave the other axis centered
+	// (update_canvas_scroll_margins centers the canvas along any axis it fits along). Centering
+	// matters most when zooming far out, where the canvas occupies a small part of the view, and
+	// anchoring would pull it off-center; anchoring matters when zoomed in, where it keeps the point
+	// under the cursor from sliding away.
+	const canvas_overflows = {
+		x: main_canvas.width * magnification > $canvas_area[0].clientWidth,
+		y: main_canvas.height * magnification > $canvas_area[0].clientHeight,
+	};
+	if (canvas_overflows.x || canvas_overflows.y) {
+		const anchor_after_zoom = from_canvas_coords(anchor_point);
+		// Note: scrollBy() not scrollTo()
+		$canvas_area[0].scrollBy({
+			left: canvas_overflows.x ? anchor_after_zoom.clientX - anchor_on_page.clientX : 0,
+			top: canvas_overflows.y ? anchor_after_zoom.clientY - anchor_on_page.clientY : 0,
+			behavior: "instant",
+		});
+	}
 
 	$G.triggerHandler("resize"); // updates handles & grid
 	$G.trigger("option-changed"); // updates options area
@@ -1973,8 +2311,9 @@ function paste(img_or_canvas) {
 		deselect();
 		select_tool(get_tool_by_id(TOOL_SELECT));
 
-		const x = Math.max(0, Math.ceil($canvas_area.scrollLeft() / magnification));
-		const y = Math.max(0, Math.ceil(($canvas_area.scrollTop()) / magnification));
+		const viewport = viewport_origin();
+		const x = Math.max(0, Math.ceil(viewport.x));
+		const y = Math.max(0, Math.ceil(viewport.y));
 		// Nevermind, canvas, isn't aligned to the right in RTL layout!
 		// let x = Math.max(0, Math.ceil($canvas_area.scrollLeft() / magnification));
 		// if (get_direction() === "rtl") {
@@ -4323,12 +4662,12 @@ function show_multi_user_setup_dialog(from_current_document) {
 
 export {
 	$this_version_news,
-	apply_file_format_and_palette_info, are_you_sure, cancel, change_some_url_params, change_url_param, choose_file_to_paste, cleanup_bitmap_view, clear, confirm_overwrite_capability, delete_selection, deselect, detect_monochrome,
+	apply_file_format_and_palette_info, are_you_sure, cancel, change_some_url_params, change_url_param, choose_file_to_paste, cleanup_bitmap_view, clear, confirm_overwrite_capability, delete_selection, deselect, detect_monochrome, draw_canvas_scaled_down,
 	edit_copy, edit_cut, edit_paste, exit_fullscreen_if_ios, file_load_from_url, file_new, file_open, file_print, file_save,
 	file_save_as, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_opaque, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
-	meld_textbox_into_canvas, open_from_file, open_from_image_info, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_convert_to_black_and_white, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_multi_user_setup_dialog, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
+	meld_textbox_into_canvas, open_from_file, open_from_image_info, pan_view_by, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_convert_to_black_and_white, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_multi_user_setup_dialog, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
 	toggle_thumbnail, try_exec_command, undo, undoable, update_canvas_rect, update_css_classes_for_conditional_messages, update_disable_aa, update_from_saved_file, update_helper_layer,
-	update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, write_image_file
+	update_canvas_scroll_margins, update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, viewport_origin, write_image_file
 };
 // Temporary globals until all dependent code is converted to ES Modules
 window.make_history_node = make_history_node; // used by app-state.js
