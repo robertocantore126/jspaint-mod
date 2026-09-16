@@ -75,6 +75,15 @@ body,
 	image-rendering: crisp-edges;
 	image-rendering: pixelated;
 }
+/* The rules above (and the `*` rules) only make sense when the canvas is at a pixel-perfect scale,
+   where nearest-neighbor scaling reproduces the pixels exactly. Otherwise fall back to smooth
+   scaling, as MS Paint does: when a canvas pixel maps to a fractional number of screen pixels,
+   nearest-neighbor makes pixels come out unevenly sized, and when zoomed out it drops whole
+   pixels rather than averaging them, so a 1px line could vanish. (See `update_disable_aa`.) */
+.canvas-area:not(.disable-aa-for-things-at-main-canvas-scale) .main-canvas,
+.canvas-area:not(.disable-aa-for-things-at-main-canvas-scale) .selection canvas {
+	image-rendering: auto;
+}
 .thumbnail-img {
 	/* these scale down, so nearest neighbor scaling looks bad */
 	image-rendering: auto;

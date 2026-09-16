@@ -18,6 +18,7 @@ import { showMessageBox } from "./msgbox.js";
 import { stopSimulatingGestures } from "./simulate-random-gestures.js";
 import { disable_speech_recognition, enable_speech_recognition, trace_and_sketch_stop } from "./speech-recognition.js";
 import { localStore } from "./storage.js";
+import { StrokeCurve } from "./stroke-curve.js";
 import { get_theme, set_theme } from "./theme.js";
 import { TOOL_AIRBRUSH, TOOL_BRUSH, TOOL_CURVE, TOOL_ELLIPSE, TOOL_ERASER, TOOL_LINE, TOOL_PENCIL, TOOL_POLYGON, TOOL_RECTANGLE, TOOL_ROUNDED_RECTANGLE, TOOL_SELECT, tools } from "./tools.js";
 
@@ -794,12 +795,15 @@ $G.on("vertical-color-box-mode-toggled", () => {
 $G.on("resize", () => { // for browser zoom, and in-app zoom of the canvas
 	update_canvas_rect();
 	update_disable_aa();
+	update_helper_layer(); // the zoomed-out view render is at a different scale now
 });
 $canvas_area.on("scroll", () => {
 	update_canvas_rect();
+	update_helper_layer(); // the zoomed-out view render only covers the region it was drawn for
 });
 $canvas_area.on("resize", () => {
 	update_magnified_canvas_size();
+	update_helper_layer(); // the viewport size changed, so does the region the view render covers
 });
 
 // Despite overflow:hidden on html and body,
@@ -1169,7 +1173,7 @@ $G.on("keydown", (e) => {
 });
 // #endregion
 
-// #region Alt+Mousewheel Zooming (and also some dev helper that I haven't used in years)
+// #region Mousewheel Zooming (and also some dev helper that I haven't used in years)
 let alt_zooming = false;
 addEventListener("keyup", (e) => {
 	if (e.key === "Alt" && alt_zooming) {
@@ -1181,21 +1185,52 @@ addEventListener("keyup", (e) => {
 });
 // $G.on("wheel", (e) => {
 addEventListener("wheel", (e) => {
-	if (e.altKey) {
+	if (e.altKey || e.ctrlKey || e.metaKey) {
+		// Alt+Mousewheel has always zoomed the canvas.
+		// Ctrl+Mousewheel (⌘+Mousewheel on Mac) is normally the browser's zoom gesture,
+		// but in a paint program it makes more sense to zoom the image, so we take it over.
+		// (Pinch-zooming on a trackpad is reported to web pages as Ctrl+wheel,
+		// so this also makes pinch-zooming zoom the image instead of the page.)
 		e.preventDefault();
+		// normalize wheel units to pixels (deltaMode 1 means lines, 2 means pages),
+		// so smooth scrolling and more exotic wheel events zoom at a predictable rate
+		const delta_y = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1);
 		let new_magnification = magnification;
-		const factor = 1 + Math.min(0.5, Math.abs(e.deltaY) / 100);
-		if (e.deltaY < 0) {
+		const factor = 1 + Math.min(0.5, Math.abs(delta_y) / 100);
+		if (delta_y < 0) {
 			new_magnification *= factor;
 		} else {
 			new_magnification /= factor;
 		}
+		// Zooming is continuous, but exact scales are special: when a canvas pixel maps to a whole
+		// number of screen pixels, the canvas is rendered with crisp nearest-neighbor scaling instead
+		// of being resampled. (See `update_disable_aa`.) Rather than letting a step jump straight over
+		// such a scale, stop at the furthest one the step would have skipped, so scrolling across
+		// 100% or 200% always passes exactly through it, however coarse the wheel increments are.
+		// Exact scales are whole multiples of one screen pixel per canvas pixel, i.e. magnifications
+		// of 1/devicePixelRatio, 2/devicePixelRatio, 3/devicePixelRatio, ...
+		// Scales the zoom is already at are ignored, so you can always scroll away from them.
+		const dpr = window.devicePixelRatio;
+		const zooming_in = new_magnification > magnification;
+		const low = Math.min(magnification, new_magnification);
+		const high = Math.max(magnification, new_magnification);
+		const epsilon = 1e-6;
+		if (zooming_in) {
+			// the furthest exact scale the step would have skipped over
+			const skipped = Math.floor(high * dpr + epsilon) / dpr;
+			if (skipped > low + epsilon) {
+				new_magnification = skipped;
+			}
+		} else {
+			// the exact scale nearest where we're heading, of those the step would have skipped over
+			const skipped = Math.ceil(low * dpr - epsilon) / dpr;
+			if (skipped < high - epsilon) {
+				new_magnification = skipped;
+			}
+		}
 		new_magnification = Math.max(0.5, Math.min(new_magnification, 80));
 		set_magnification(new_magnification, to_canvas_coords(e));
-		alt_zooming = true;
-		return;
-	}
-	if (e.ctrlKey || e.metaKey) {
+		alt_zooming = e.altKey;
 		return;
 	}
 	// for reference screenshot mode (development helper):
@@ -1398,6 +1433,32 @@ function tool_go(selected_tool, event_name) {
 		selected_tool.paint(main_ctx, pointer.x, pointer.y);
 	}
 }
+const stroke_curve = new StrokeCurve();
+/**
+ * The pointer path represented by a pointermove event. Browsers deliver pointer events at
+ * the display refresh rate, but often have several samples between frames available
+ * (from a high polling rate mouse, or from a stylus), which `getCoalescedEvents` exposes.
+ * Without those, a fast stroke is drawn as a polygon connecting frame to frame.
+ * @param {PointerEvent} e
+ * @returns {PointerEvent[]}
+ */
+function get_pointer_path(e) {
+	const coalesced_events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
+	return coalesced_events.length > 0 ? coalesced_events : [e];
+}
+/**
+ * Draws a freehand stroke through the given points, in client coordinates.
+ * @param {{ x: number, y: number }[]} points
+ */
+function paint_freehand_path(points) {
+	for (const point of points) {
+		pointer = to_canvas_coords({ clientX: point.x, clientY: point.y });
+		selected_tools.forEach((selected_tool) => {
+			tool_go(selected_tool);
+		});
+		pointer_previous = pointer;
+	}
+}
 function canvas_pointer_move(e) {
 	ctrl = e.ctrlKey;
 	shift = e.shiftKey;
@@ -1451,6 +1512,15 @@ function canvas_pointer_move(e) {
 				}
 			}
 		}
+	}
+	if (selected_tools.every((selected_tool) => selected_tool.get_brush)) {
+		// Freehand tools draw a line along the pointer path, so follow the pointer as closely
+		// as the browser can tell us, and draw a smooth curve through the samples, rather than
+		// a kinky chain of straight segments. (Bresenham lines connect the dots.)
+		for (const pointer_event of get_pointer_path(e)) {
+			paint_freehand_path(stroke_curve.add({ x: pointer_event.clientX, y: pointer_event.clientY }));
+		}
+		return;
 	}
 	selected_tools.forEach((selected_tool) => {
 		tool_go(selected_tool);
@@ -1655,6 +1725,7 @@ $canvas.on("pointerdown", (e) => {
 	ctrl = e.ctrlKey;
 	shift = e.shiftKey;
 	pointer_start = pointer_previous = pointer = to_canvas_coords(e);
+	stroke_curve.reset({ x: e.clientX, y: e.clientY });
 
 	const pointerdown_action = () => {
 		let interval_ids = [];
@@ -1681,6 +1752,11 @@ $canvas.on("pointerdown", (e) => {
 			// don't create undoables if you're two-finger-panning
 			// @TODO: do any tools use pointerup for cleanup?
 			if (!no_undoable) {
+				// The end of a freehand stroke's curve can only be drawn once the stroke ends,
+				// since it depends on where the stroke is going.
+				if (!canceling && selected_tools.every((selected_tool) => selected_tool.get_brush)) {
+					paint_freehand_path(stroke_curve.end(e.clientX === undefined ? null : { x: e.clientX, y: e.clientY }));
+				}
 				selected_tools.forEach((selected_tool) => {
 					selected_tool.pointerup?.(main_ctx, pointer.x, pointer.y);
 				});
@@ -1795,6 +1871,7 @@ window.api_for_cypress_tests = {
 		clear();
 	},
 	selected_colors,
+	stroke_curve,
 	set_theme,
 	$,
 };

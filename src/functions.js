@@ -268,6 +268,73 @@ function update_helper_layer_immediately() {
 	}
 }
 
+/** Reusable intermediate canvases for `draw_canvas_downscaled`, to avoid allocating on every frame. */
+const downscale_scratch_canvases = [];
+/**
+ * @param {number} index
+ * @param {number} width
+ * @param {number} height
+ * @returns {PixelCanvas}
+ */
+function get_downscale_scratch_canvas(index, width, height) {
+	let canvas = downscale_scratch_canvases[index];
+	if (!canvas) {
+		canvas = downscale_scratch_canvases[index] = make_canvas(width, height);
+	} else if (canvas.width !== width || canvas.height !== height) {
+		canvas.width = width;
+		canvas.height = height;
+	}
+	return canvas;
+}
+
+/**
+ * Draw a region of a canvas, scaled down, averaging the whole footprint of each source pixel.
+ *
+ * A single `drawImage` can't do this: the browser's scaling is a bilinear approximation that only
+ * considers a couple of source pixels per output pixel. When scaling down, a 1px line (as in pixel
+ * art) can therefore slip between the samples, coming out faint and broken up into dots, which is
+ * especially noticeable with a diagonal line, when the zoom level isn't a whole fraction.
+ * Halving the image repeatedly instead makes every source pixel contribute, because each 2:1 step
+ * averages exactly 2x2 source pixels. That's the same idea as a mipmap, and it gives the look of
+ * MS Paint zoomed out: thin lines stay continuous, and get grainy/blurry rather than disappearing.
+ * The result is then scaled from the last halving step (at most 1.5x, so barely blurrier) to the
+ * exact target size.
+ * @param {CanvasRenderingContext2D} ctx - the destination context, already sized for the target
+ * @param {HTMLCanvasElement | PixelCanvas} source - the document canvas
+ * @param {number} source_x
+ * @param {number} source_y
+ * @param {number} source_width
+ * @param {number} source_height
+ * @param {number} target_width
+ * @param {number} target_height
+ */
+function draw_canvas_downscaled(ctx, source, source_x, source_y, source_width, source_height, target_width, target_height) {
+	// @ts-ignore - TypeScript doesn't like reassigning a union type like this
+	let image = source;
+	let x = source_x;
+	let y = source_y;
+	let width = source_width;
+	let height = source_height;
+	let iteration = 0;
+	// Halve while the remaining reduction is still substantial
+	while (width > target_width * 1.5 && height > target_height * 1.5) {
+		const half_width = Math.max(1, Math.round(width / 2));
+		const half_height = Math.max(1, Math.round(height / 2));
+		const half = get_downscale_scratch_canvas(iteration++ % 2, half_width, half_height);
+		const half_ctx = half.ctx;
+		half_ctx.clearRect(0, 0, half_width, half_height);
+		half_ctx.imageSmoothingEnabled = true;
+		half_ctx.drawImage(image, x, y, width, height, 0, 0, half_width, half_height);
+		image = half;
+		x = 0;
+		y = 0;
+		width = half_width;
+		height = half_height;
+	}
+	ctx.imageSmoothingEnabled = true;
+	ctx.drawImage(image, x, y, width, height, 0, 0, target_width, target_height);
+}
+
 /**
  * @param {PixelCanvas} hcanvas
  * @param {number} scale
@@ -288,6 +355,29 @@ function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_la
 		// Draw the actual document canvas (for the thumbnail)
 		// (For the main canvas view, the helper layer is separate from (and overlaid on top of) the document canvas)
 		hctx.drawImage(main_canvas, viewport_x, viewport_y, hcanvas.width, hcanvas.height, 0, 0, hcanvas.width, hcanvas.height);
+	} else if (scale < 1) {
+		// Zoomed out, the view is a scaled-down image of the document, and the document canvas itself
+		// is scaled down by the browser (just as a CSS width/height on it), which isn't the right
+		// quality of resampling for pixel art - thin lines come out faint and dotted. (See
+		// `draw_canvas_downscaled`.) So draw the document into the helper layer ourselves instead,
+		// with area-averaged resampling, which covers the document canvas entirely
+		// (the helper layer always covers at least the visible region, plus a margin).
+		draw_canvas_downscaled(
+			hctx, main_canvas,
+			viewport_x, viewport_y, hcanvas.width / scale, hcanvas.height / scale,
+			hcanvas.width, hcanvas.height
+		);
+	}
+
+	// Previews (brush cursors, in-progress strokes, selection boxes) are drawn scaled down into this
+	// layer too when zoomed out. With nearest-neighbor scaling (the default here, so that previews
+	// line up with the canvas pixels exactly when zoomed in), a thin 1px preview would come out as
+	// a dotted line - unlike the document layer drawn above with area-averaged resampling - and then
+	// change appearance when the stroke is committed to the document. So interpolate when scaled down.
+	if (scale < 1) {
+		hctx.enable_image_smoothing();
+	} else {
+		hctx.disable_image_smoothing();
 	}
 
 	var tools_to_preview = [...selected_tools];
@@ -383,8 +473,19 @@ function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_la
 }
 function update_disable_aa() {
 	const dots_per_canvas_px = window.devicePixelRatio * magnification;
-	const round = Math.floor(dots_per_canvas_px) === dots_per_canvas_px;
-	$canvas_area.toggleClass("disable-aa-for-things-at-main-canvas-scale", dots_per_canvas_px >= 3 || round);
+	// Whether to render the canvas with nearest-neighbor filtering (the `disable-aa-...` class),
+	// as opposed to letting the browser interpolate between pixels.
+	// Zooming in is the case where you want to see the individual pixels, so nearest-neighbor is
+	// used whenever a canvas pixel maps to an exact whole number of screen pixels, which keeps the
+	// pixels evenly sized and perfectly crisp. (A whole number is also what makes it safe: at a
+	// fractional scale like 1.5, nearest-neighbor makes some pixels 1 screen pixel wide and others
+	// 2, which looks lumpy.)
+	// Zooming out always gets smooth (area-like) resampling, because nearest-neighbor would drop
+	// whole pixels rather than average them, and a 1px line could disappear entirely.
+	const zoomed_in = dots_per_canvas_px >= 1;
+	// compared with a tolerance, since zooming by multiplication leaves things like 1.9999999999
+	const round = Math.abs(dots_per_canvas_px - Math.round(dots_per_canvas_px)) < 0.01;
+	$canvas_area.toggleClass("disable-aa-for-things-at-main-canvas-scale", zoomed_in && (dots_per_canvas_px >= 3 || round));
 }
 
 /**

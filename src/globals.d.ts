@@ -433,6 +433,7 @@ interface Window {
 			background: string | CanvasPattern,
 			ternary: string | CanvasPattern,
 		};
+		stroke_curve: import("./stroke-curve.js").StrokeCurve;
 		set_theme: (theme_file_name: string) => void;
 		$: JQueryStatic;
 	};

@@ -83,7 +83,7 @@ I want to bring good old Paint into the modern era.
 
 Editing Features:
 
-* Use Alt+Mousewheel to zoom in and out
+* Use Alt+Mousewheel or Ctrl+Mousewheel to zoom in and out
 * Edit transparent images! To create a transparent image,
   go to **Image > Attributes...** and select Transparent,
   then OK, and then **Image > Clear Image** or use the Eraser tool.
