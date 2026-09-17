@@ -699,6 +699,8 @@ interface Tool {
 	shape_colors?: boolean,
 	/** Used for Curve, Line, Pencil tools. */
 	stroke_only?: boolean,
+	/** Paints directly into the document instead of using a preview mask. */
+	draw_directly?: boolean,
 	/** Used by Airbrush tool */
 	paint_on_time_interval?: number,
 

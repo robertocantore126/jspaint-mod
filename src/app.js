@@ -488,13 +488,13 @@ const canvas_handles = new Handles({
 	$handles_container: $canvas_area,
 	$object_container: $canvas_area,
 	get_rect: () => ({ x: 0, y: 0, width: main_canvas.width, height: main_canvas.height }),
-	set_rect: ({ width, height }) => resize_canvas_and_save_dimensions(width, height),
+	set_rect: ({ x, y, width, height }) => resize_canvas_and_save_dimensions(width, height, {}, x, y),
 	outset: 4,
 	get_handles_offset_left: () => canvas_scroll_origin().left + 1,
 	get_handles_offset_top: () => canvas_scroll_origin().top + 1,
 	get_ghost_offset_left: () => canvas_scroll_origin().left + 1,
 	get_ghost_offset_top: () => canvas_scroll_origin().top + 1,
-	size_only: true,
+	size_only: false,
 });
 window.canvas_handles = canvas_handles;
 
@@ -909,6 +909,9 @@ $("body").on("dragover dragenter", (/** @type {JQuery.DragOverEvent | JQuery.Dra
 $G.on("keydown", (e) => {
 	// typecast to HTMLElement because e.target is incorrectly given as Window, due to $G wrapping window
 	const target = /** @type {HTMLElement} */ (/** @type {unknown} */ (e.target));
+	if (e.code === "Space") {
+		spacebar_down = true;
+	}
 
 	if (e.isDefaultPrevented()) {
 		return;
@@ -1175,6 +1178,9 @@ $G.on("keydown", (e) => {
 // #region Mousewheel Zooming (and also some dev helper that I haven't used in years)
 let alt_zooming = false;
 addEventListener("keyup", (e) => {
+	if (e.code === "Space") {
+		spacebar_down = false;
+	}
 	if (e.key === "Alt" && alt_zooming) {
 		e.preventDefault(); // prevent menu bar from activating in Firefox from zooming
 	}
@@ -1675,6 +1681,7 @@ $G.on("pointermove", (event) => {
 let pan_pointer_id = null;
 let pan_last_client_position = null;
 let pan_cursor_before = null;
+let spacebar_down = false;
 $canvas_area.on("pointerdown", (event) => {
 	if (event.button !== 1) {
 		return;
@@ -1722,6 +1729,19 @@ $G.on("pointerup pointercancel", (event) => {
 // #region Primary Canvas Interaction (continued)
 $canvas.on("pointerdown", (e) => {
 	update_canvas_rect();
+	if (e.button === 0 && spacebar_down) {
+		e.preventDefault();
+		pan_pointer_id = e.pointerId;
+		pan_last_client_position = { x: e.clientX, y: e.clientY };
+		pan_cursor_before = main_canvas.style.cursor;
+		main_canvas.style.cursor = "grabbing";
+		try {
+			$canvas_area[0].setPointerCapture(e.pointerId);
+		} catch {
+			// the pointer must already be up
+		}
+		return;
+	}
 
 	// Quick Undo when there are multiple pointers (i.e. for touch)
 	// see pointermove for other pointer types
@@ -1871,6 +1891,7 @@ prevent_selection($colorbox);
 
 // Stop drawing (or dragging or whatever) if you Alt+Tab or whatever
 $G.on("blur", () => {
+	spacebar_down = false;
 	$G.triggerHandler("pointerup");
 });
 

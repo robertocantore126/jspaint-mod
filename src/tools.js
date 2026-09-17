@@ -4,10 +4,56 @@
 import { OnCanvasSelection } from "./OnCanvasSelection.js";
 import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 // import { get_language, localize } from "./app-localization.js";
-import { deselect, draw_canvas_scaled_down, get_tool_by_id, meld_selection_into_canvas, meld_textbox_into_canvas, set_magnification, show_error_message, undoable, update_helper_layer } from "./functions.js";
+import { deselect, draw_canvas_scaled_down, get_tool_by_id, meld_selection_into_canvas, meld_textbox_into_canvas, set_magnification, show_error_message, undoable, update_helper_layer, visible_source_region } from "./functions.js";
 import { $G, E, canvas_scroll_origin, get_icon_for_tool, get_icon_for_tools, get_rgba_from_color, make_canvas, make_css_cursor } from "./helpers.js";
 import { bresenham_dense_line, bresenham_line, copy_contents_within_polygon, draw_bezier_curve, draw_ellipse, draw_fill, draw_line, draw_line_strip, draw_noncontiguous_fill, draw_polygon, draw_quadratic_curve, draw_rounded_rectangle, draw_selection_box, get_circumference_points_for_brush, replace_colors_with_swatch, stamp_brush_canvas, update_brush_for_drawing_lines } from "./image-manipulation.js";
 import { $ChooseShapeStyle, $choose_airbrush_size, $choose_brush, $choose_eraser_size, $choose_magnification, $choose_stroke_size, $choose_transparent_mode } from "./tool-options.js";
+
+/**
+ * Reusable canvas for tinting a mask, sized to the part of the mask that's on view, rather than the
+ * whole document. It's reused across frames rather than allocated per frame, since allocating and
+ * copying a document-sized canvas per pointermove is what made drawing lag on a big picture.
+ * @type {PixelCanvas | null}
+ */
+let mask_tint_canvas = null;
+/**
+ * Copy the on-view part of a mask canvas onto the tint canvas, ready to be tinted and composited.
+ *
+ * The freehand tools paint into a *document-sized* mask (it has to be document-sized, to be
+ * composited into the document at the end), but only the part that's on view can be seen, so that's
+ * all that needs copying, recoloring, or drawing. Measured on a 7.2 megapixel picture, this is the
+ * difference between about 23 megapixels of source drawn per pointermove and about 0.5, which is
+ * most of why freehand drawing on a large image felt sluggish.
+ *
+ * The caller gets back the canvas, plus where in the document it belongs, so that document
+ * coordinates (such as where to stamp a brush cursor) can be translated into it.
+ * @param {CanvasRenderingContext2D} ctx - the destination, with the view transform applied
+ * @param {HTMLCanvasElement | PixelCanvas} mask_canvas
+ * @returns {{canvas: PixelCanvas, x: number, y: number} | null} null when none of the mask is on view
+ */
+function copy_mask_for_view(ctx, mask_canvas) {
+	const region = visible_source_region(ctx, mask_canvas, 0, 0);
+	if (!region) { return null; }
+	if (!mask_tint_canvas) {
+		mask_tint_canvas = make_canvas(region.width, region.height);
+	} else if (mask_tint_canvas.width !== region.width || mask_tint_canvas.height !== region.height) {
+		mask_tint_canvas.width = region.width;
+		mask_tint_canvas.height = region.height;
+	}
+	// `replace_colors_with_swatch` leaves the context in "source-in" mode, so reset it: the copy
+	// below has to land on the cleared canvas, not be masked by what was there last frame.
+	mask_tint_canvas.ctx.globalCompositeOperation = "source-over";
+	// (interpolation off, since the mask is document-scale and this is a whole-pixel copy)
+	mask_tint_canvas.ctx.disable_image_smoothing();
+	mask_tint_canvas.ctx.clearRect(0, 0, region.width, region.height);
+	// Draw the region at 1:1, but as far as the tinting and compositing below are concerned the
+	// canvas *is* positioned at region.x/region.y in the document.
+	mask_tint_canvas.ctx.drawImage(mask_canvas,
+		region.x, region.y, region.width, region.height,
+		0, 0, region.width, region.height
+	);
+	return { canvas: mask_tint_canvas, x: region.x, y: region.y };
+}
 
 // This is for linting stuff at the bottom.
 // It has to be defined per file, so I'm defining it up top and immediately disabling it.
@@ -464,9 +510,10 @@ const tools = [{
 				gradient.addColorStop(6 / n, "gold");
 				color = gradient;
 			}
-			const mask_fill_canvas = make_canvas(this.mask_canvas);
-			replace_colors_with_swatch(mask_fill_canvas.ctx, color, 0, 0);
-			draw_canvas_scaled_down(ctx, mask_fill_canvas, 0, 0);
+			const tint = copy_mask_for_view(ctx, this.mask_canvas);
+			if (!tint) { return; }
+			replace_colors_with_swatch(tint.canvas.ctx, color, tint.x, tint.y);
+			draw_canvas_scaled_down(ctx, tint.canvas, tint.x, tint.y);
 		}
 	},
 	pointerup() {
@@ -745,6 +792,7 @@ const tools = [{
 	description: localize("Draws a free-form line one pixel wide."),
 	cursor: ["pencil", [13, 23], "crosshair"],
 	stroke_only: true,
+	draw_directly: true,
 	get_brush() {
 		return { size: pencil_size, shape: "circle" };
 	},
@@ -1485,9 +1533,19 @@ tools.forEach((tool) => {
 			tool.mask_canvas.ctx.disable_image_smoothing();
 		};
 		tool.pointerdown = (_ctx, _x, _y) => {
+			if (tool.draw_directly) {
+				return;
+			}
 			tool.init_mask_canvas();
 		};
 		tool.pointerup = () => {
+			if (tool.draw_directly) {
+				undoable({
+					name: tool.name,
+					icon: get_icon_for_tool(tool),
+				}, () => { });
+				return;
+			}
 			undoable({
 				name: tool.name,
 				icon: get_icon_for_tool(tool),
@@ -1502,15 +1560,16 @@ tools.forEach((tool) => {
 		tool.paint = () => {
 			const brush = tool.get_brush();
 			const circumference_points = get_circumference_points_for_brush(brush.shape, brush.size);
-			tool.mask_canvas.ctx.fillStyle = stroke_color;
+			const paint_ctx = tool.draw_directly ? main_ctx : tool.mask_canvas.ctx;
+			paint_ctx.fillStyle = stroke_color;
 			const iterate_line = brush.size > 1 ? bresenham_dense_line : bresenham_line;
 			iterate_line(pointer_previous.x, pointer_previous.y, pointer.x, pointer.y, (x, y) => {
 				for (const point of circumference_points) {
-					tool.mask_canvas.ctx.fillRect(x + point.x, y + point.y, 1, 1);
+					paint_ctx.fillRect(x + point.x, y + point.y, 1, 1);
 				}
 			});
-			stamp_brush_canvas(tool.mask_canvas.ctx, pointer_previous.x, pointer_previous.y, brush.shape, brush.size);
-			stamp_brush_canvas(tool.mask_canvas.ctx, pointer.x, pointer.y, brush.shape, brush.size);
+			stamp_brush_canvas(paint_ctx, pointer_previous.x, pointer_previous.y, brush.shape, brush.size);
+			stamp_brush_canvas(paint_ctx, pointer.x, pointer.y, brush.shape, brush.size);
 		};
 
 		tool.cancel = () => {
@@ -1552,19 +1611,20 @@ tools.forEach((tool) => {
 				gradient.addColorStop(6 / n, "gold");
 				color = gradient;
 			}
-			// @TODO: perf: keep this canvas around too
-			const mask_fill_canvas = make_canvas(tool.mask_canvas);
+			const tint = copy_mask_for_view(ctx, tool.mask_canvas);
+			if (!tint) { return translucent; }
 			if (previewing && tool.dynamic_preview_cursor) {
 				const brush = tool.get_brush();
 				// dynamic cursor preview:
 				// stamp just onto this temporary canvas so it's temporary
-				stamp_brush_canvas(mask_fill_canvas.ctx, pointer.x, pointer.y, brush.shape, brush.size);
+				stamp_brush_canvas(tint.canvas.ctx, pointer.x - tint.x, pointer.y - tint.y, brush.shape, brush.size);
 			}
-			replace_colors_with_swatch(mask_fill_canvas.ctx, color, 0, 0);
-			draw_canvas_scaled_down(ctx, mask_fill_canvas, 0, 0);
+			replace_colors_with_swatch(tint.canvas.ctx, color, tint.x, tint.y);
+			draw_canvas_scaled_down(ctx, tint.canvas, tint.x, tint.y);
 			return translucent;
 		};
 		tool.drawPreviewUnderGrid = (ctx, _x, _y, _grid_visible, scale, translate_x, translate_y) => {
+			if (tool.draw_directly) { return; }
 			if (!pointer_active && !pointer_over_canvas) { return; }
 
 			ctx.scale(scale, scale);

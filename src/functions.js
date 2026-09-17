@@ -484,14 +484,19 @@ function can_use_native_downscaling() {
  * @param {number} target_height
  */
 function draw_canvas_downscaled(ctx, source, source_x, source_y, source_width, source_height, target_width, target_height) {
-	if (can_use_native_downscaling()) {
+	// Near 100% zoom, a little more edge retention keeps lineart from looking overly compressed.
+	// Limit this exception to reductions of 2x or less: at stronger zoom-outs, some browsers' native
+	// filters drop thin lines, so the exact area resampler remains the safer choice there.
+	const reduction_factor = Math.max(source_width / target_width, source_height / target_height);
+	const near_zoom = reduction_factor <= 2;
+	if (can_use_native_downscaling() || near_zoom) {
 		const previous_smoothing = ctx.imageSmoothingEnabled;
 		const previous_quality = ctx.imageSmoothingQuality;
 		// Clear first, so the result replaces what's there rather than blending with it, matching the
 		// `putImageData` of the resampling done below (the destination may be a reused scratch canvas).
 		ctx.clearRect(0, 0, target_width, target_height);
 		ctx.imageSmoothingEnabled = true;
-		ctx.imageSmoothingQuality = "medium";
+		ctx.imageSmoothingQuality = near_zoom ? "high" : "medium";
 		ctx.drawImage(source, source_x, source_y, source_width, source_height, 0, 0, target_width, target_height);
 		ctx.imageSmoothingEnabled = previous_smoothing;
 		ctx.imageSmoothingQuality = previous_quality;
@@ -587,6 +592,46 @@ function get_downscale_result_canvas(width, height) {
 }
 
 /**
+ * The part of a document-scale canvas that can land in a context's canvas, in the source canvas's
+ * own coordinates, or null if none of it can (or if the context's transform can't be reasoned about:
+ * a rotation, skew, or flip, which the view never uses).
+ *
+ * Everything outside this region is off-view, so drawing it is wasted work. That matters because the
+ * freehand tools composite a *document-sized* mask canvas of the stroke so far into the view on every
+ * pointermove: on a 7.2 megapixel picture, one pointermove asks the browser to resample 23 megapixels
+ * of source into a 0.2 megapixel viewport.
+ *
+ * The region is rounded outwards, so interpolated edge pixels are still covered.
+ * @param {CanvasRenderingContext2D} ctx - a context with the view transform applied
+ * @param {HTMLCanvasElement | PixelCanvas} source
+ * @param {number} dest_x - where the source's top-left corner goes, in document coordinates
+ * @param {number} dest_y
+ * @returns {{x: number, y: number, width: number, height: number} | null}
+ */
+function visible_source_region(ctx, source, dest_x, dest_y) {
+	const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+	const scale = transform && transform.a;
+	if (!transform || !scale || !isFinite(scale) || transform.b !== 0 || transform.c !== 0 || transform.d !== scale) {
+		// Can't map the viewport into the source, so assume (conservatively) that all of it shows.
+		return { x: 0, y: 0, width: source.width, height: source.height };
+	}
+	// The transform maps document coordinates to destination pixels as `doc * scale + transform.e`
+	// (and `f` vertically), so the source's extent on the destination canvas is clipped to that canvas.
+	const visible_x1 = Math.max(0, dest_x * scale + transform.e);
+	const visible_y1 = Math.max(0, dest_y * scale + transform.f);
+	const visible_x2 = Math.min(ctx.canvas.width, (dest_x + source.width) * scale + transform.e);
+	const visible_y2 = Math.min(ctx.canvas.height, (dest_y + source.height) * scale + transform.f);
+	if (visible_x2 <= visible_x1 || visible_y2 <= visible_y1) { return null; }
+	// ...and mapped back into the source's own coordinates.
+	const x = Math.max(0, Math.floor((visible_x1 - transform.e) / scale - dest_x) - 1);
+	const y = Math.max(0, Math.floor((visible_y1 - transform.f) / scale - dest_y) - 1);
+	const x2 = Math.min(source.width, Math.ceil((visible_x2 - transform.e) / scale - dest_x) + 1);
+	const y2 = Math.min(source.height, Math.ceil((visible_y2 - transform.f) / scale - dest_y) + 1);
+	if (x2 <= x || y2 <= y) { return null; }
+	return { x, y, width: x2 - x, height: y2 - y };
+}
+
+/**
  * Draw a document-scale canvas - a selection's or text box's contents, or a tool's preview canvas -
  * into the view, resampling the same way the document itself is drawn when zoomed out: averaging
  * the whole footprint of each source pixel. (See `draw_canvas_downscaled`.)
@@ -602,7 +647,7 @@ function get_downscale_result_canvas(width, height) {
  * `ctx.translate(translate_x, translate_y)`, as the previews and the selection drawing set up), on
  * top of the identity - which is the base transform for both the helper layer and the thumbnail.
  * @param {CanvasRenderingContext2D} ctx
- * @param {HTMLCanvasElement | PixelCanvas} source - a document-scale canvas, drawn whole
+ * @param {HTMLCanvasElement | PixelCanvas} source - a document-scale canvas
  * @param {number} dest_x - where its top-left corner goes, in document coordinates
  * @param {number} dest_y
  */
@@ -613,10 +658,32 @@ function draw_canvas_scaled_down(ctx, source, dest_x, dest_y) {
 	const transform = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
 	const scale = transform && transform.a;
 	// Only a plain uniform scale and translation is expected; no rotation, skew, or flip. Anything
-	// else (and zooming in, where the browser's resampling is what you want, so that a preview lines
-	// up with the canvas pixels exactly) is left to a plain drawImage.
-	if (!scale || scale >= 1 || transform.b !== 0 || transform.c !== 0 || transform.d !== scale) {
+	// else is left to a plain drawImage of the whole source.
+	if (!scale || !isFinite(scale) || transform.b !== 0 || transform.c !== 0 || transform.d !== scale) {
 		ctx.drawImage(source, dest_x, dest_y);
+		return;
+	}
+	if (scale >= 1) {
+		// Zoomed in (or at 100%), where the source pixels map to whole screen pixels and should stay
+		// crisp. Draw just the slice of the source that can land in the destination, at its own scale:
+		// the transform maps document coordinates to destination pixels as `doc * scale + transform.e`
+		// (and `f` vertically), so everything outside the canvas is off-view and can be skipped.
+		//
+		// It has to be skipped, not merely be redundant: the freehand tools keep a *document-sized*
+		// mask canvas of the stroke so far, and composite it into the view on every pointermove (in
+		// `render_from_mask`, which draws it twice, once to punch through and once tinted). Drawing
+		// the whole mask asks the browser to resample the entire document - measured at 23 megapixels
+		// of source per pointermove on a 7.2 megapixel image, against a 0.2 megapixel viewport - so
+		// drawing lags on a big picture in a way that has nothing to do with the brush or the
+		// document, and everything to do with how much is being drawn.
+		const region = visible_source_region(ctx, source, dest_x, dest_y);
+		if (!region) { return; }
+		// Same geometry as drawing the whole source: source pixel `region.x + i` still lands at
+		// document `dest_x + region.x + i`.
+		ctx.drawImage(source,
+			region.x, region.y, region.width, region.height,
+			dest_x + region.x, dest_y + region.y, region.width, region.height
+		);
 		return;
 	}
 	// Work out the part of the source that can land in the destination in terms of *destination*
@@ -3560,7 +3627,7 @@ function make_opaque() {
  * @param {number} unclamped_height - The new height of the canvas. Will be clamped to a minimum of 1.
  * @param {{name?: string, icon?: HTMLImageElement | HTMLCanvasElement}} [undoable_meta={}] - overrides certain properties of ActionMetadata
  */
-function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_height, undoable_meta = {}) {
+function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_height, undoable_meta = {}, offset_x = 0, offset_y = 0) {
 	const new_width = Math.max(1, unclamped_width);
 	const new_height = Math.max(1, unclamped_height);
 	if (main_canvas.width !== new_width || main_canvas.height !== new_height) {
@@ -3569,7 +3636,11 @@ function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_heig
 			icon: undoable_meta.icon || get_help_folder_icon("p_stretch_both.png"),
 		}, () => {
 			try {
-				const image_data = main_ctx.getImageData(0, 0, new_width, new_height);
+				const image_data = offset_x || offset_y ? null : main_ctx.getImageData(0, 0, new_width, new_height);
+				const original_canvas = image_data ? null : make_canvas(main_canvas.width, main_canvas.height);
+				if (original_canvas) {
+					original_canvas.ctx.drawImage(main_canvas, 0, 0);
+				}
 				main_canvas.width = new_width;
 				main_canvas.height = new_height;
 				main_ctx.disable_image_smoothing();
@@ -3579,8 +3650,12 @@ function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_heig
 					main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
 				}
 
-				const temp_canvas = make_canvas(image_data);
-				main_ctx.drawImage(temp_canvas, 0, 0);
+				if (image_data) {
+					const temp_canvas = make_canvas(image_data);
+					main_ctx.drawImage(temp_canvas, 0, 0);
+				} else {
+					main_ctx.drawImage(original_canvas, -offset_x, -offset_y);
+				}
 			} catch (exception) {
 				if (exception.name === "NS_ERROR_FAILURE") {
 					// or localize("There is not enough memory or resources to complete operation.")
@@ -3605,8 +3680,8 @@ function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_heig
  * @param {number} unclamped_height - The new height of the canvas. Will be clamped to a minimum of 1.
  * @param {{name?: string, icon?: HTMLImageElement | HTMLCanvasElement}} [undoable_meta={}] - overrides certain properties of ActionMetadata
  */
-function resize_canvas_and_save_dimensions(unclamped_width, unclamped_height, undoable_meta = {}) {
-	resize_canvas_without_saving_dimensions(unclamped_width, unclamped_height, undoable_meta);
+function resize_canvas_and_save_dimensions(unclamped_width, unclamped_height, undoable_meta = {}, offset_x = 0, offset_y = 0) {
+	resize_canvas_without_saving_dimensions(unclamped_width, unclamped_height, undoable_meta, offset_x, offset_y);
 	localStore.set({
 		width: main_canvas.width.toString(),
 		height: main_canvas.height.toString(),
@@ -4666,8 +4741,7 @@ export {
 	edit_copy, edit_cut, edit_paste, exit_fullscreen_if_ios, file_load_from_url, file_new, file_open, file_print, file_save,
 	file_save_as, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_opaque, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
 	meld_textbox_into_canvas, open_from_file, open_from_image_info, pan_view_by, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_convert_to_black_and_white, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_multi_user_setup_dialog, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
-	toggle_thumbnail, try_exec_command, undo, undoable, update_canvas_rect, update_css_classes_for_conditional_messages, update_disable_aa, update_from_saved_file, update_helper_layer,
-	update_canvas_scroll_margins, update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, viewport_origin, write_image_file
+	toggle_thumbnail, try_exec_command, undo, undoable, update_canvas_rect, update_canvas_scroll_margins, update_css_classes_for_conditional_messages, update_disable_aa, update_from_saved_file, update_helper_layer, update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, viewport_origin, visible_source_region, write_image_file
 };
 // Temporary globals until all dependent code is converted to ES Modules
 window.make_history_node = make_history_node; // used by app-state.js
