@@ -1,8 +1,9 @@
 // @ts-check
 // eslint-disable-next-line no-unused-vars
 /* global saved:writable, brush_size:writable, pencil_size:writable, stroke_size:writable */
-/* global $canvas_area, aliasing, localize, main_canvas, main_ctx, palette, selected_colors, selection, stroke_color, transparency */
+/* global $canvas_area, aliasing, localize, main_canvas, palette, selected_colors, selection, stroke_color, transparency */
 // import { localize } from "./app-localization.js";
+import { document_model } from "./document-model.js";
 import { cancel, deselect, detect_monochrome, show_error_message, undoable, update_title } from "./functions.js";
 import { $G, TAU, get_help_folder_icon, get_rgba_from_color, make_canvas, memoize_synchronous_function } from "./helpers.js";
 
@@ -207,6 +208,52 @@ const stamp_brush_canvas = (ctx, x, y, brush_shape, brush_size) => {
 	const offset_y = -Math.ceil(brush_canvas.height / 2);
 
 	ctx.drawImage(brush_canvas, x + offset_x, y + offset_y);
+};
+
+/**
+ * Gets a brush canvas tinted with the given color, for tools that paint directly into the document
+ * rather than into a mask (which gets tinted as a whole when it's composited).
+ *
+ * USAGE NOTE: must be called outside of any other usage of op_canvas (because of render_brush)
+ *
+ * @param {BrushShape} brush_shape
+ * @param {number} brush_size
+ * @param {string | CanvasPattern | CanvasGradient} color
+ * @returns {PixelCanvas}
+ */
+const get_tinted_brush_canvas_implementation = (brush_shape, brush_size, color) => {
+	const brush_canvas = get_brush_canvas(brush_shape, brush_size);
+	const tinted_canvas = make_canvas(brush_canvas);
+	// The brush canvas is a black silhouette; "source-in" replaces it with the color, keeping its alpha.
+	replace_colors_with_swatch(tinted_canvas.ctx, color, 0, 0);
+	return tinted_canvas;
+};
+const get_tinted_brush_canvas = memoize_synchronous_function(get_tinted_brush_canvas_implementation, 20);
+
+$G.on("invalidate-brush-canvases", () => {
+	get_tinted_brush_canvas.clear_memo_cache();
+});
+
+/**
+ * Stamps a brush canvas, tinted with the given color, onto the specified context.
+ * (See `stamp_brush_canvas` to stamp the black silhouette as-is, which is for mask-based tools.)
+ *
+ * USAGE NOTE: must be called outside of any other usage of op_canvas (because of render_brush)
+ *
+ * @param {CanvasRenderingContext2D} ctx - The rendering context to draw on.
+ * @param {number} x - The x-coordinate for the center of the brush.
+ * @param {number} y - The y-coordinate for the center of the brush.
+ * @param {BrushShape} brush_shape - The shape of the brush.
+ * @param {number} brush_size - The size of the brush.
+ * @param {string | CanvasPattern | CanvasGradient} color - The color/pattern to stamp with.
+ */
+const stamp_brush_canvas_tinted = (ctx, x, y, brush_shape, brush_size, color) => {
+	const tinted_canvas = get_tinted_brush_canvas(brush_shape, brush_size, color);
+
+	const offset_x = -Math.ceil(tinted_canvas.width / 2);
+	const offset_y = -Math.ceil(tinted_canvas.height / 2);
+
+	ctx.drawImage(tinted_canvas, x + offset_x, y + offset_y);
 };
 
 /**
@@ -761,10 +808,14 @@ function draw_noncontiguous_fill_separately(source_ctx, dest_ctx, x, y) {
  * The transformation function can change the size of the new canvas, and it will update the selection or document accordingly.
  *
  * @param {{name: string, icon: HTMLImageElement | HTMLCanvasElement}} meta - object containing the name and icon for undo history.
- * @param {(original_canvas: PixelCanvas, original_ctx: PixelContext, new_canvas: PixelCanvas, new_ctx: PixelContext) => void} fn - The image transformation function to apply.
+ * @param {(original_canvas: PixelCanvas, original_ctx: PixelContext, new_canvas: PixelCanvas, new_ctx: PixelContext, info?: { is_backdrop?: boolean }) => void} fn - The image transformation function to apply. When transforming every layer, `info.is_backdrop` says whether the canvas being transformed is the document's backdrop layer, i.e. the bottom-most visible one; a transformation that fills in empty area with the background color should only do so for that layer, or the upper layers would each cover the ones below them.
+ * @param {object} [options]
+ * @param {boolean} [options.to_all_layers] - whether to transform every layer (for geometry
+ *   operations, which have to keep the layers aligned with each other) instead of just the active
+ *   layer (for pixel-value operations like Invert Colors).
  */
-function apply_image_transformation(meta, fn) {
-	const original_canvas = selection ? selection.source_canvas : main_canvas;
+function apply_image_transformation(meta, fn, { to_all_layers = false } = {}) {
+	const original_canvas = selection ? selection.source_canvas : document_model.get_active_layer_canvas();
 
 	const new_canvas = make_canvas(original_canvas.width, original_canvas.height);
 
@@ -791,7 +842,20 @@ function apply_image_transformation(meta, fn) {
 			saved = false;
 			update_title();
 
-			main_ctx.copy(new_canvas);
+			if (to_all_layers) {
+				// Every layer is transformed the same way, so the layers stay aligned with each other.
+				// (A transformation that fills the new area with the background color, like rotating by
+				// an arbitrary angle in opaque mode, fills it in the backdrop layer only, so that the
+				// layers don't end up each covering the ones below them.)
+				document_model.transform_layers((layer_canvas, _node, { is_backdrop }) => {
+					const transformed = make_canvas(layer_canvas.width, layer_canvas.height);
+					fn(layer_canvas, layer_canvas.ctx, transformed, transformed.ctx, { is_backdrop });
+					return transformed;
+				}, new_canvas.width, new_canvas.height);
+			} else {
+				// (This resizes the document if the transformation changed its dimensions, e.g. rotate 90°.)
+				document_model.set_active_layer_canvas(new_canvas, true);
+			}
 
 			// $canvas.trigger("update"); // update handles
 			$canvas_area.trigger("resize"); // update handles and magnified canvas size (CSS width/height)
@@ -807,7 +871,7 @@ function flip_horizontal() {
 		new_ctx.translate(new_canvas.width, 0);
 		new_ctx.scale(-1, 1);
 		new_ctx.drawImage(original_canvas, 0, 0);
-	});
+	}, { to_all_layers: true });
 }
 
 function flip_vertical() {
@@ -818,7 +882,7 @@ function flip_vertical() {
 		new_ctx.translate(0, new_canvas.height);
 		new_ctx.scale(1, -1);
 		new_ctx.drawImage(original_canvas, 0, 0);
-	});
+	}, { to_all_layers: true });
 }
 
 /**
@@ -830,7 +894,7 @@ function rotate(angle) {
 	apply_image_transformation({
 		name: `${localize("Rotate by angle")} ${angle / TAU * 360} ${localize("Degrees")}`,
 		icon: get_help_folder_icon(`p_rotate_${angle >= 0 ? "cw" : "ccw"}.png`),
-	}, (original_canvas, _original_ctx, new_canvas, new_ctx) => {
+	}, (original_canvas, _original_ctx, new_canvas, new_ctx, { is_backdrop = true } = {}) => {
 		new_ctx.save();
 		switch (angle) {
 			case TAU / 4:
@@ -885,7 +949,7 @@ function rotate(angle) {
 				new_canvas.height = bb_h;
 				new_ctx.disable_image_smoothing();
 
-				if (!transparency) {
+				if (!transparency && is_backdrop) {
 					new_ctx.fillStyle = selected_colors.background;
 					new_ctx.fillRect(0, 0, new_canvas.width, new_canvas.height);
 				}
@@ -898,7 +962,7 @@ function rotate(angle) {
 		}
 		new_ctx.drawImage(original_canvas, 0, 0);
 		new_ctx.restore();
-	});
+	}, { to_all_layers: true });
 }
 
 /**
@@ -922,7 +986,7 @@ function stretch_and_skew(x_scale, y_scale, h_skew, v_skew) {
 						(x_scale !== 1) ? "p_stretch_both.png" : "p_stretch_v.png"
 					) : "p_stretch_h.png"
 		),
-	}, (original_canvas, _original_ctx, new_canvas, new_ctx) => {
+	}, (original_canvas, _original_ctx, new_canvas, new_ctx, { is_backdrop = true } = {}) => {
 		const w = original_canvas.width * x_scale;
 		const h = original_canvas.height * y_scale;
 
@@ -953,7 +1017,7 @@ function stretch_and_skew(x_scale, y_scale, h_skew, v_skew) {
 		new_canvas.height = Math.max(1, bb_h);
 		new_ctx.disable_image_smoothing();
 
-		if (!transparency) {
+		if (!transparency && is_backdrop) {
 			new_ctx.fillStyle = selected_colors.background;
 			new_ctx.fillRect(0, 0, new_canvas.width, new_canvas.height);
 		}
@@ -969,7 +1033,7 @@ function stretch_and_skew(x_scale, y_scale, h_skew, v_skew) {
 		);
 		new_ctx.drawImage(original_canvas, 0, 0, w, h);
 		new_ctx.restore();
-	});
+	}, { to_all_layers: true });
 }
 
 /**
@@ -1735,6 +1799,6 @@ export {
 	apply_image_transformation, bresenham_dense_line, bresenham_line, compute_bezier, draw_bezier_curve, draw_bezier_curve_without_pattern_support, draw_ellipse, draw_fill,
 	draw_fill_separately, draw_fill_without_pattern_support, draw_grid, draw_line, draw_line_without_pattern_support, draw_noncontiguous_fill,
 	draw_noncontiguous_fill_separately, draw_noncontiguous_fill_without_pattern_support, draw_quadratic_curve, draw_rounded_rectangle, find_color_globally, flip_horizontal,
-	flip_vertical, get_brush_canvas_size, get_circumference_points_for_brush, invert_monochrome, invert_rgb, render_brush, replace_color_globally, replace_colors_with_swatch, rotate, stamp_brush_canvas, stretch_and_skew, threshold_black_and_white, update_brush_for_drawing_lines
+	flip_vertical, get_brush_canvas_size, get_circumference_points_for_brush, invert_monochrome, invert_rgb, render_brush, replace_color_globally, replace_colors_with_swatch, rotate, stamp_brush_canvas, stamp_brush_canvas_tinted, stretch_and_skew, threshold_black_and_white, update_brush_for_drawing_lines
 };
 

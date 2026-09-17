@@ -82,6 +82,8 @@ function manage_storage() {
 			$tr.next().find(".remove-button").focus();
 
 			localStorage.removeItem(k);
+			// A session also stores its layers (if it has any) under a separate key.
+			localStorage.removeItem(k.replace(/^image#/, "layers#"));
 			$tr.remove();
 			if ($table.find("tr").length == 0) {
 				$message.html("<p>All clear!</p>");

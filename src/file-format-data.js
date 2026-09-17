@@ -131,6 +131,22 @@ palette_formats.sort((a, b) =>
 	0
 );
 
-export { formats_unique_per_file_extension, image_formats, palette_formats };
+/**
+ * The layered document format. It can't be decoded by the regular image loaders, but it should be
+ * selectable in the Open dialog, and it's offered as a save format by File > Save Layered Document.
+ * @type {ImageFileFormat}
+ */
+const layered_document_format = {
+	formatID: "application/x-jjlayers",
+	mimeType: "application/x-jjlayers",
+	name: localize("Layered Paint Document"),
+	nameWithExtensions: localize("Layered Paint Document (*.jjlayers)"),
+	extensions: ["jjlayers"],
+};
+
+/** Image formats plus the layered document format, for the Open dialog. */
+const document_formats = image_formats.concat([layered_document_format]);
+
+export { document_formats, formats_unique_per_file_extension, image_formats, layered_document_format, palette_formats };
 // Temporary globals until all dependent code is converted to ES Modules
 window.formats_unique_per_file_extension = formats_unique_per_file_extension; // used by electron-injected.js

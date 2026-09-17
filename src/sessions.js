@@ -5,6 +5,7 @@
 import { $DialogWindow } from "./$ToolWindow.js";
 // import { localize } from "./app-localization.js";
 import { change_url_param, get_uris, load_image_from_uri, open_from_image_info, redo, reset_file, show_error_message, show_resource_load_error_message, undo, undoable, update_title } from "./functions.js";
+import { document_model } from "./document-model.js";
 import { $G, debounce, get_help_folder_icon, image_data_match, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
 import { storage_quota_exceeded } from "./manage-storage.js";
 import { showMessageBox } from "./msgbox.js";
@@ -109,11 +110,31 @@ function handle_data_loss() {
 	return save_paused;
 }
 
+/**
+ * Reads a saved layer tree out of storage, whether it was stored as JSON text or as an object.
+ * @param {unknown} value
+ * @returns {object | null}
+ */
+function parse_saved_layers(value) {
+	if (value == null) { return null; }
+	if (typeof value === "string") {
+		try {
+			const parsed = JSON.parse(value);
+			return parsed && typeof parsed === "object" ? parsed : null;
+		} catch (error) {
+			log("Failed to parse saved layers:", error);
+			return null;
+		}
+	}
+	return typeof value === "object" ? /** @type {object} */ (value) : null;
+}
+
 class LocalSession {
 	constructor(session_id) {
 		this.id = session_id;
 		const ls_key = `image#${session_id}`;
-		log(`Local storage key: ${ls_key}`);
+		const layers_key = `layers#${session_id}`;
+		log(`Local storage keys: ${ls_key}, ${layers_key}`);
 		// save image to storage
 		this.save_image_to_storage_immediately = () => {
 			const save_paused = handle_data_loss();
@@ -135,7 +156,48 @@ class LocalSession {
 			});
 		};
 		this.save_image_to_storage_soon = debounce(this.save_image_to_storage_immediately, 100);
-		localStore.get(ls_key, (err, uri) => {
+
+		// The layer tree is saved under its own key, alongside the flattened image. The flattened
+		// image is still saved because it's what the storage manager shows as a thumbnail, and it's
+		// the fallback for documents saved before layers existed, or if the layer tree can't be
+		// saved or understood.
+		let layers_key_in_use = false;
+		this.save_layers_to_storage_immediately = () => {
+			const layers = document_model.flatten_bottom_to_top();
+			const has_groups = document_model.get_root().children.some((child) => child.type === "group");
+			if (layers.length <= 1 && !has_groups) {
+				// A document with a single layer is fully described by the flattened image, so get rid
+				// of any layers key that would otherwise bring back deleted layers.
+				if (layers_key_in_use) {
+					localStorage.removeItem(layers_key);
+					layers_key_in_use = false;
+				}
+				return;
+			}
+			// (An empty document's layers aren't backed up either. This mirrors the pause in
+			// handle_data_loss, but without its side effects: the recovery dialog, and the update of
+			// the undo count it tracks, are the flattened image save's business, and both saves are
+			// triggered by the same session-update.)
+			if (!canvas_has_any_apparent_image_data()) { return; }
+			if ($recovery_window && !$recovery_window.closed) { return; }
+			log(`Saving layers to storage: ${layers_key}`);
+			localStore.set(layers_key, JSON.stringify(document_model.serialize()), (err) => {
+				if (!err) {
+					layers_key_in_use = true;
+					return;
+				}
+				// @ts-ignore (quotaExceeded is added by storage.js)
+				if (err.quotaExceeded) {
+					storage_quota_exceeded();
+				}
+				// Other errors (e.g. localStorage is disabled) are reported by the image save.
+			});
+		};
+		// Saving layers re-encodes the ones that changed, which is still more expensive than saving
+		// the flattened image, so it's debounced further, and skipped for single-layer documents.
+		this.save_layers_to_storage_soon = debounce(this.save_layers_to_storage_immediately, 600);
+
+		localStore.get([ls_key, layers_key], (err, values) => {
 			if (err) {
 				if (localStorageAvailable) {
 					show_error_message("Failed to retrieve image from local storage.", err);
@@ -145,11 +207,41 @@ class LocalSession {
 						message: "Please enable local storage in your browser's settings for local backup. It may be called Cookies, Storage, or Site Data.",
 					});
 				}
-			} else if (uri) {
+				return;
+			}
+			const uri = values && values[ls_key];
+			const stored_layers = values && values[layers_key];
+			const saved_layers = parse_saved_layers(stored_layers);
+			if (stored_layers != null && (saved_layers === null || saved_layers.version !== document_model.serialization_version)) {
+				// A saved layer tree that can't be understood (corrupt, or saved by another version of the
+				// app) is never going to be useful, so drop it, rather than reading it on every reload.
+				// (The session still has its flattened image, which is what gets loaded instead.)
+				log("Dropping an unreadable saved layer tree");
+				localStorage.removeItem(layers_key);
+			}
+			if (uri) {
 				load_image_from_uri(uri).then((info) => {
-					open_from_image_info(info, null, null, true, true);
+					// The saved layers, if any, replace the single layer the flattened image loads into.
+					open_from_image_info(info, null, null, true, true, saved_layers);
 				}, (error) => {
 					show_error_message("Failed to open image from local storage.", error);
+				});
+			} else if (saved_layers) {
+				// The flattened image is gone (e.g. it was too big to save, or was removed from
+				// storage), but the layers are intact, so restore them on their own.
+				log("Restoring saved layers without a flattened image");
+				document_model.load_serialized(saved_layers).then((restored) => {
+					if (!restored) {
+						// The saved layer tree couldn't be read, so it's never going to be useful: drop it,
+						// rather than trying (and failing) again on every reload.
+						localStorage.removeItem(layers_key);
+						this.save_image_to_storage_soon();
+						return;
+					}
+					reset_file(); // (also marks the document as saved)
+					$canvas_area.trigger("resize");
+					// Start autosaving the restored document (which also saves the layers).
+					$G.triggerHandler("session-update");
 				});
 			} else {
 				// no uri so lets save the blank canvas
@@ -158,12 +250,15 @@ class LocalSession {
 		});
 		$G.on("session-update.session-hook", () => {
 			this.save_image_to_storage_soon();
+			this.save_layers_to_storage_soon();
 		});
 	}
 	end() {
 		// Skip debounce and save immediately
 		this.save_image_to_storage_soon.cancel();
 		this.save_image_to_storage_immediately();
+		this.save_layers_to_storage_soon.cancel();
+		this.save_layers_to_storage_immediately();
 		// Remove session-related hooks
 		$G.off(".session-hook");
 	}
@@ -403,8 +498,8 @@ class FirebaseSession {
 							name: "Sync Session",
 							icon: get_help_folder_icon("p_database.png"),
 						}, () => {
-							// Write the image data to the canvas
-							main_ctx.copy(img);
+							// Write the image data to the document
+							document_model.load_image(img);
 							$canvas_area.trigger("resize");
 						});
 						ignore_session_update = false;
@@ -874,8 +969,8 @@ class RESTSession {
 						name: "Sync Session",
 						icon: get_help_folder_icon("p_database.png"),
 					}, () => {
-						// Write the image data to the canvas
-						main_ctx.copy(img);
+						// Write the image data to the document
+						document_model.load_image(img);
 						$canvas_area.trigger("resize");
 					});
 					this._ignore_session_update = false;

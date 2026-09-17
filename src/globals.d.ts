@@ -271,13 +271,15 @@ declare const menu_bar: MenuBar;
 declare const systemHookDefaults: SystemHooks;
 declare const systemHooks: SystemHooks;
 
-declare function update_fill_and_stroke_colors_and_lineWidth(tool: Tool): void;
-declare function tool_go(tool: Tool, event_name?: string): void;
+declare function update_fill_and_stroke_colors_and_lineWidth(ctx: CanvasRenderingContext2D, tool: Tool): void;
+declare function tool_go(tool: Tool, event_name?: string, event?: PointerEvent): void;
 
 // Globals temporarily exported from ES Modules,
 // as well as globals from scripts that are not converted to ESM yet.
 // This supports `window.*` property access.
 interface Window {
+	// document-model.js
+	document_model: typeof import("./document-model.js").document_model;
 	// helpers.js
 	$G: JQuery<Window>;
 	make_canvas: {
@@ -427,6 +429,20 @@ interface Window {
 	default_stroke_size: number;
 
 	api_for_cypress_tests: {
+		reset_canvas_and_history: () => void;
+		document_model: typeof import("./document-model.js").document_model;
+		// The layered document format, so tests can round-trip a document without driving dialogs.
+		write_layered_file: typeof import("./document-handlers.js").write_layered_file;
+		read_layered_file: typeof import("./document-handlers.js").read_layered_file;
+		is_layered_file: typeof import("./document-handlers.js").is_layered_file;
+		open_from_file: (file: Blob, source_file_handle?: UserFileHandle) => Promise<void>;
+		undo: () => void;
+		redo: () => void;
+		// Geometry operations, which are otherwise only reachable through dialogs.
+		rotate: (angle: number) => void;
+		flip_horizontal: () => void;
+		transparency: boolean;
+		resize_canvas_and_save_dimensions: (width: number, height: number, undoable_meta?: { name?: string, icon?: HTMLImageElement | HTMLCanvasElement }, offset_x?: number, offset_y?: number) => void;
 		reset_for_next_test: () => void;
 		selected_colors: {
 			foreground: string | CanvasPattern,
@@ -790,6 +806,11 @@ interface HistoryNode {
 	soft: boolean;
 	/** the image data for the canvas (TODO: region updates) */
 	image_data: ImageData | null;
+	/**
+	 * Structural snapshot of the layer tree for layer-aware undo/redo.
+	 * (See `snapshot()`/`restore()` in document-model.js; typed loosely to avoid a circular import.)
+	 */
+	layer_history_state?: unknown;
 	/** the image data for the selection, if any */
 	selection_image_data: ImageData | null;
 	/** the x position of the selection, if any */

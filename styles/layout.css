@@ -1182,3 +1182,97 @@ summary {
 .menu-item:not(.highlight) .too-big-soon-gif {
 	transform: scale(0.6);
 }
+.layers-component {
+	width: 190px;
+	max-height: 360px;
+	box-sizing: border-box;
+	padding: 3px;
+}
+.layers-panel {
+	display: flex;
+	flex-flow: column;
+	min-height: 120px;
+	background: var(--ButtonFace);
+	color: var(--ButtonText);
+}
+.layers-toolbar {
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	border-bottom: 1px solid var(--ButtonShadow);
+}
+.layers-toolbar button,
+.layer-row button {
+	font: inherit;
+	padding: 0;
+}
+.layers-toolbar button {
+	width: 24px;
+	height: 22px;
+}
+.layers-list {
+	overflow: auto;
+	min-height: 80px;
+	max-height: 310px;
+	padding: 2px 0;
+}
+.layer-row {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	min-height: 38px;
+	padding: 2px 3px;
+	padding-left: calc(3px + var(--layer-depth) * 14px);
+	box-sizing: border-box;
+	border: 1px solid transparent;
+	user-select: none;
+}
+.layer-row.active {
+	background: var(--Hilight);
+	color: var(--HilightText);
+}
+.layer-row.selected:not(.active) {
+	border-color: var(--ButtonShadow);
+}
+.layer-row:focus-visible {
+	outline: 1px dotted var(--ButtonText, black);
+	outline-offset: -3px;
+}
+.layer-row.drop-target {
+	border-color: var(--Hilight);
+	background: var(--ButtonFace);
+}
+.layer-visibility {
+	width: 20px;
+	border: 0;
+	background: transparent;
+}
+.layer-expand {
+	width: 16px;
+	border: 0;
+	background: transparent;
+}
+.layer-thumbnail {
+	width: 30px;
+	height: 30px;
+	background: var(--Window, white);
+	border: 1px solid var(--ButtonShadow);
+}
+.layer-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 42px;
+	flex: 1 1 auto;
+}
+.layer-name-input {
+	font: inherit;
+	width: 62px;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+.layer-opacity {
+	width: 46px;
+	flex: 0 0 auto;
+	margin-left: auto;
+}

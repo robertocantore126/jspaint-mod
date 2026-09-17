@@ -1,18 +1,21 @@
 // @ts-check
 // eslint-disable-next-line no-unused-vars
 /* global airbrush_size:writable, brush_shape:writable, brush_size:writable, button:writable, ctrl:writable, eraser_size:writable, fill_color:writable, pick_color_slot:writable, history_node_to_cancel_to:writable, MenuBar:writable, my_canvas_height:writable, my_canvas_width:writable, palette:writable, pencil_size:writable, pointer:writable, pointer_active:writable, pointer_buttons:writable, pointer_over_canvas:writable, pointer_previous:writable, pointer_start:writable, pointer_type:writable, pointers:writable, reverse:writable, shift:writable, stroke_color:writable, stroke_size:writable, update_helper_layer_on_pointermove_active:writable */
-/* global AccessKeys, current_history_node, default_airbrush_size, default_brush_shape, default_brush_size, default_canvas_height, default_canvas_width, default_eraser_size, default_magnification, default_pencil_size, default_stroke_size, enable_fs_access_api, file_name, get_direction, localize, magnification, main_canvas, main_ctx, minimum_magnification, return_to_tools, selected_colors, selected_tool, selected_tools, selection, systemHooks, textbox, transparency */
+/* global AccessKeys, current_history_node, default_airbrush_size, default_brush_shape, default_brush_size, default_canvas_height, default_canvas_width, default_eraser_size, default_magnification, default_pencil_size, default_stroke_size, enable_fs_access_api, file_name, get_direction, localize, magnification, main_canvas, minimum_magnification, return_to_tools, selected_colors, selected_tool, selected_tools, selection, systemHooks, textbox, transparency:writable */
 
 import { $ColorBox } from "./$ColorBox.js";
+import { initialize_layers } from "./$Layers.js";
 import { $ToolBox } from "./$ToolBox.js";
+import { document_model } from "./document-model.js";
 import { Handles } from "./Handles.js";
 // import { get_direction, localize } from "./app-localization.js";
 import { default_palette, get_winter_palette } from "./color-data.js";
 import { image_formats } from "./file-format-data.js";
 import { $this_version_news, cancel, change_some_url_params, change_url_param, clear, confirm_overwrite_capability, delete_selection, deselect, edit_copy, edit_cut, edit_paste, file_new, file_open, file_save, file_save_as, get_tool_by_id, get_uris, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, make_or_update_undoable, open_from_file, pan_view_by, paste, paste_image_from_file, redo, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, save_as_prompt, select_all, select_tool, select_tools, set_magnification, show_document_history, show_error_message, show_news, show_resource_load_error_message, toggle_grid, undo, update_canvas_rect, update_canvas_scroll_margins, update_disable_aa, update_helper_layer, update_magnified_canvas_size, view_bitmap, write_image_file } from "./functions.js";
+import { is_layered_file, read_layered_file, write_layered_file } from "./document-handlers.js";
 import { show_help } from "./help.js";
 import { $G, E, TAU, canvas_scroll_origin, get_file_extension, get_help_folder_icon, is_discord_embed, make_canvas, to_canvas_coords } from "./helpers.js";
-import { init_webgl_stuff, rotate } from "./image-manipulation.js";
+import { flip_horizontal, init_webgl_stuff, rotate } from "./image-manipulation.js";
 import { menus } from "./menus.js";
 import { showMessageBox } from "./msgbox.js";
 import { stopSimulatingGestures } from "./simulate-random-gestures.js";
@@ -1334,6 +1337,7 @@ $G.on("cut copy paste", (e) => {
 reset_file();
 reset_selected_colors();
 reset_canvas_and_history(); // (with newly reset colors)
+initialize_layers();
 set_magnification(default_magnification);
 
 // this is synchronous for now, but @TODO: handle possibility of loading a document before callback
@@ -1351,13 +1355,13 @@ localStore.get({
 		name: "Resize Canvas For New Document",
 		icon: get_help_folder_icon("p_stretch_both.png"),
 	}, () => {
-		main_canvas.width = Math.max(1, my_canvas_width);
-		main_canvas.height = Math.max(1, my_canvas_height);
-		main_ctx.disable_image_smoothing();
-		if (!transparency) {
-			main_ctx.fillStyle = selected_colors.background;
-			main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
-		}
+		document_model.resize_canvas(
+			Math.max(1, my_canvas_width),
+			Math.max(1, my_canvas_height),
+			0,
+			0,
+			transparency ? null : selected_colors.background,
+		);
 		$canvas_area.trigger("resize");
 	});
 });
@@ -1393,16 +1397,22 @@ update_palette_from_theme();
 
 // #endregion
 
-function update_fill_and_stroke_colors_and_lineWidth(selected_tool) {
-	main_ctx.lineWidth = stroke_size;
+/**
+ * Sets up the drawing state for a tool. Tool output goes to the active layer, not to the visible
+ * (composited) canvas, so the target context is passed in.
+ * @param {CanvasRenderingContext2D} ctx - the active layer's context
+ * @param {Tool} selected_tool
+ */
+function update_fill_and_stroke_colors_and_lineWidth(ctx, selected_tool) {
+	ctx.lineWidth = stroke_size;
 
 	const reverse_because_fill_only = !!(selected_tool.$options && selected_tool.$options.fill && !selected_tool.$options.stroke);
 	/** @type {ColorSelectionSlot} */
 	const color_k =
 		(ctrl && selected_colors.ternary && pointer_active) ? "ternary" :
 			((reverse !== reverse_because_fill_only) ? "background" : "foreground");
-	main_ctx.fillStyle = fill_color =
-		main_ctx.strokeStyle = stroke_color =
+	ctx.fillStyle = fill_color =
+		ctx.strokeStyle = stroke_color =
 		selected_colors[color_k];
 
 	/** @type {ColorSelectionSlot} */
@@ -1421,21 +1431,24 @@ function update_fill_and_stroke_colors_and_lineWidth(selected_tool) {
 				stroke_color_k = "foreground";
 			}
 		}
-		main_ctx.fillStyle = fill_color = selected_colors[fill_color_k];
-		main_ctx.strokeStyle = stroke_color = selected_colors[stroke_color_k];
+		ctx.fillStyle = fill_color = selected_colors[fill_color_k];
+		ctx.strokeStyle = stroke_color = selected_colors[stroke_color_k];
 	}
 	pick_color_slot = fill_color_k;
 }
 
 // #region Primary Canvas Interaction
-function tool_go(selected_tool, event_name) {
-	update_fill_and_stroke_colors_and_lineWidth(selected_tool);
+function tool_go(selected_tool, event_name, event) {
+	// Tools draw into the active layer. The model composites the active layer (and the rest of the
+	// stack) into the visible canvas, so main_ctx is never a drawing target.
+	const ctx = document_model.get_active_layer_ctx();
+	update_fill_and_stroke_colors_and_lineWidth(ctx, selected_tool);
 
 	if (selected_tool[event_name]) {
-		selected_tool[event_name](main_ctx, pointer.x, pointer.y);
+		selected_tool[event_name](ctx, pointer.x, pointer.y, event);
 	}
 	if (selected_tool.paint) {
-		selected_tool.paint(main_ctx, pointer.x, pointer.y);
+		selected_tool.paint(ctx, pointer.x, pointer.y);
 	}
 }
 const stroke_curve = new StrokeCurve();
@@ -1793,9 +1806,13 @@ $canvas.on("pointerdown", (e) => {
 
 	const pointerdown_action = () => {
 		let interval_ids = [];
+		// Tools paint into the active layer from here until pointerup. This makes any of the layer's
+		// pixels that are still owned by the current history state private to this stroke, so undo
+		// can still return to them.
+		document_model.begin_stroke();
 		selected_tools.forEach((selected_tool) => {
 			if (selected_tool.paint || selected_tool.pointerdown) {
-				tool_go(selected_tool, "pointerdown");
+				tool_go(selected_tool, "pointerdown", e);
 			}
 			if (selected_tool.paint_on_time_interval != null) {
 				interval_ids.push(setInterval(() => {
@@ -1822,9 +1839,10 @@ $canvas.on("pointerdown", (e) => {
 					paint_freehand_path(stroke_curve.end(e.clientX === undefined ? null : { x: e.clientX, y: e.clientY }));
 				}
 				selected_tools.forEach((selected_tool) => {
-					selected_tool.pointerup?.(main_ctx, pointer.x, pointer.y);
+					selected_tool.pointerup?.(document_model.get_active_layer_ctx(), pointer.x, pointer.y);
 				});
 			}
+			document_model.end_stroke();
 
 			if (selected_tools.length === 1) {
 				if (selected_tool.deselect) {
@@ -1924,18 +1942,39 @@ $G.on("fullscreenchange webkitfullscreenchange", () => {
 // #region Testing Helpers
 // Note: this is defined here so the app is loaded when this is defined.
 window.api_for_cypress_tests = {
+	reset_canvas_and_history,
+	document_model,
+	// The layered document format, so tests can round-trip a document without driving dialogs.
+	write_layered_file,
+	read_layered_file,
+	is_layered_file,
+	open_from_file,
+	undo,
+	redo,
+	// Geometry operations, which are otherwise only reachable through dialogs.
+	rotate,
+	flip_horizontal,
+	resize_canvas_and_save_dimensions,
 	reset_for_next_test() {
 		selected_colors.foreground = "#000";
 		selected_colors.background = "#fff";
+		transparency = false;
 		brush_shape = default_brush_shape;
 		brush_size = default_brush_size;
 		eraser_size = default_eraser_size;
 		airbrush_size = default_airbrush_size;
 		pencil_size = default_pencil_size;
 		stroke_size = default_stroke_size;
-		clear();
+		// Reset the document (including its layer tree) and the history, so tests don't leak state.
+		reset_canvas_and_history();
 	},
-	selected_colors,
+	// A getter, because the app can replace the selected_colors object (see reset_selected_colors),
+	// so tests should always reach the current one.
+	get selected_colors() { return selected_colors; },
+	// Whether the document is in transparent mode, which operations like resizing and rotating use
+	// to decide whether to fill in empty area with the background color.
+	get transparency() { return transparency; },
+	set transparency(value) { transparency = value; },
 	stroke_curve,
 	set_theme,
 	$,

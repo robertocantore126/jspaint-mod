@@ -1,7 +1,8 @@
 // @ts-check
-/* global $canvas_area, $status_position, $status_size, main_canvas, main_ctx, selected_colors, tool_transparent_mode, transparency */
+/* global $canvas_area, $status_position, $status_size, main_canvas, selected_colors, tool_transparent_mode, transparency */
 import { Handles } from "./Handles.js";
 import { OnCanvasObject } from "./OnCanvasObject.js";
+import { document_model } from "./document-model.js";
 import { get_tool_by_id, make_or_update_undoable, undoable, update_helper_layer } from "./functions.js";
 import { $G, canvas_scroll_origin, get_icon_for_tool, get_rgba_from_color, make_canvas, make_css_cursor, to_canvas_coords } from "./helpers.js";
 import { replace_colors_with_swatch } from "./image-manipulation.js";
@@ -67,8 +68,9 @@ class OnCanvasSelection extends OnCanvasObject {
 				}
 				this.canvas = make_canvas(this.source_canvas);
 			} else {
+				// The selection takes its pixels from the active layer (the layer being edited).
 				this.source_canvas = make_canvas(this.width, this.height);
-				this.source_canvas.ctx.drawImage(main_canvas, this.x, this.y, this.width, this.height, 0, 0, this.width, this.height);
+				this.source_canvas.ctx.drawImage(document_model.get_active_layer_canvas(), this.x, this.y, this.width, this.height, 0, 0, this.width, this.height);
 				this.canvas = make_canvas(this.source_canvas);
 				this.cut_out_background();
 			}
@@ -162,8 +164,9 @@ class OnCanvasSelection extends OnCanvasObject {
 	}
 	cut_out_background() {
 		const cutout = this.canvas;
+		const target_ctx = document_model.get_active_layer_ctx();
 		// doc/this or canvas/cutout, either of those pairs would result in variable names of equal length which is nice :)
-		const canvasImageData = main_ctx.getImageData(this.x, this.y, this.width, this.height);
+		const canvasImageData = target_ctx.getImageData(this.x, this.y, this.width, this.height);
 		const cutoutImageData = cutout.ctx.getImageData(0, 0, this.width, this.height);
 		// cutoutImageData is initialized with the shape to be cut out (whether rectangular or polygonal)
 		// and should end up as the cut out image data for the selection
@@ -196,7 +199,7 @@ class OnCanvasSelection extends OnCanvasObject {
 				cutoutImageData.data[i + 3] = 0;
 			}
 		}
-		main_ctx.putImageData(canvasImageData, this.x, this.y);
+		target_ctx.putImageData(canvasImageData, this.x, this.y);
 		cutout.ctx.putImageData(cutoutImageData, 0, 0);
 		this.update_tool_transparent_mode();
 		// NOTE: in case you want to use the tool_transparent_mode
@@ -210,8 +213,9 @@ class OnCanvasSelection extends OnCanvasObject {
 		// and even if you do, if you do it after creating a selection, it still won't work,
 		// because you will have already *not cut out* the selection from the canvas
 		if (!transparency || tool_transparent_mode) {
-			main_ctx.drawImage(colored_cutout, this.x, this.y);
+			target_ctx.drawImage(colored_cutout, this.x, this.y);
 		}
+		document_model.invalidate();
 
 		$G.triggerHandler("session-update"); // autosave
 		update_helper_layer();
@@ -298,7 +302,14 @@ class OnCanvasSelection extends OnCanvasObject {
 	}
 	draw() {
 		try {
-			main_ctx.drawImage(this.canvas, this.x, this.y);
+			// Draw into the active layer, and show the result immediately.
+			document_model.get_active_layer_ctx().drawImage(this.canvas, this.x, this.y);
+			document_model.invalidate({
+				x: Math.min(this.x, 0),
+				y: Math.min(this.y, 0),
+				width: this.width + Math.abs(this.x),
+				height: this.height + Math.abs(this.y),
+			});
 		} catch (_error) {
 			// ignore
 		}

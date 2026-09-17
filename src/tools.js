@@ -1,12 +1,13 @@
 // @ts-check
 /* global selection:writable, stroke_size:writable, textbox:writable */
-/* global $canvas, $canvas_area, $status_size, airbrush_size, brush_shape, brush_size, button, canvas_handles, ctrl, eraser_size, fill_color, pick_color_slot, get_language, localize, magnification, main_canvas, main_ctx, pencil_size, pointer, pointer_active, pointer_over_canvas, pointer_previous, pointer_start, return_to_magnification, selected_colors, shift, stroke_color, transparency */
+/* global $canvas, $canvas_area, $status_size, airbrush_size, brush_shape, brush_size, button, canvas_handles, ctrl, eraser_size, fill_color, pick_color_slot, get_language, localize, magnification, main_canvas, pencil_size, pointer, pointer_active, pointer_over_canvas, pointer_previous, pointer_start, return_to_magnification, selected_colors, shift, stroke_color, transparency */
 import { OnCanvasSelection } from "./OnCanvasSelection.js";
 import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
+import { document_model } from "./document-model.js";
 // import { get_language, localize } from "./app-localization.js";
 import { deselect, draw_canvas_scaled_down, get_tool_by_id, meld_selection_into_canvas, meld_textbox_into_canvas, set_magnification, show_error_message, undoable, update_helper_layer, visible_source_region } from "./functions.js";
 import { $G, E, canvas_scroll_origin, get_icon_for_tool, get_icon_for_tools, get_rgba_from_color, make_canvas, make_css_cursor } from "./helpers.js";
-import { bresenham_dense_line, bresenham_line, copy_contents_within_polygon, draw_bezier_curve, draw_ellipse, draw_fill, draw_line, draw_line_strip, draw_noncontiguous_fill, draw_polygon, draw_quadratic_curve, draw_rounded_rectangle, draw_selection_box, get_circumference_points_for_brush, replace_colors_with_swatch, stamp_brush_canvas, update_brush_for_drawing_lines } from "./image-manipulation.js";
+import { bresenham_dense_line, bresenham_line, copy_contents_within_polygon, draw_bezier_curve, draw_ellipse, draw_fill, draw_line, draw_line_strip, draw_noncontiguous_fill, draw_polygon, draw_quadratic_curve, draw_rounded_rectangle, draw_selection_box, get_circumference_points_for_brush, replace_colors_with_swatch, stamp_brush_canvas, stamp_brush_canvas_tinted, update_brush_for_drawing_lines } from "./image-manipulation.js";
 import { $ChooseShapeStyle, $choose_airbrush_size, $choose_brush, $choose_eraser_size, $choose_magnification, $choose_stroke_size, $choose_transparent_mode } from "./tool-options.js";
 
 /**
@@ -255,7 +256,7 @@ const tools = [{
 		const rect_h = inversion_size;
 
 		const ctx_dest = this.preview_canvas.ctx;
-		const id_src = main_ctx.getImageData(rect_x, rect_y, rect_w, rect_h);
+		const id_src = document_model.get_active_layer_ctx().getImageData(rect_x, rect_y, rect_w, rect_h);
 		const id_dest = ctx_dest.getImageData(rect_x, rect_y, rect_w, rect_h);
 
 		for (let i = 0, l = id_dest.data.length; i < l; i += 4) {
@@ -274,7 +275,7 @@ const tools = [{
 		this.preview_canvas.height = 1;
 
 		const contents_within_polygon = copy_contents_within_polygon(
-			main_canvas,
+			document_model.get_active_layer_canvas(),
 			this.points,
 			this.x_min,
 			this.y_min,
@@ -343,9 +344,9 @@ const tools = [{
 			}
 			if (ctrl) {
 				undoable({ name: "Crop" }, () => {
-					var cropped_canvas = make_canvas(rect_width, rect_height);
-					cropped_canvas.ctx.drawImage(main_canvas, -rect_x, -rect_y);
-					main_ctx.copy(cropped_canvas);
+					// Cropping changes the canvas size, which is a document-level property, so it
+					// crops every layer by the same offset.
+					document_model.resize_canvas(rect_width, rect_height, rect_x, rect_y);
 					canvas_handles.show();
 					$canvas_area.trigger("resize"); // does this not also call canvas_handles.show()?
 				});
@@ -516,7 +517,7 @@ const tools = [{
 			draw_canvas_scaled_down(ctx, tint.canvas, tint.x, tint.y);
 		}
 	},
-	pointerup() {
+	pointerup(ctx) {
 		if (!this.mask_canvas) {
 			return; // not sure why this would happen per se
 		}
@@ -524,7 +525,7 @@ const tools = [{
 			name: get_language().match(/^en\b/) ? (this.color_eraser_mode ? "Color Eraser" : "Eraser") : localize("Eraser/Color Eraser"),
 			icon: get_icon_for_tool(this),
 		}, () => {
-			this.render_from_mask(main_ctx);
+			this.render_from_mask(ctx);
 
 			this.mask_canvas = null;
 		});
@@ -1390,9 +1391,10 @@ tools.forEach((tool) => {
 		};
 		tool.paint = () => {
 			tool.shape_canvas.ctx.clearRect(0, 0, tool.shape_canvas.width, tool.shape_canvas.height);
-			tool.shape_canvas.ctx.fillStyle = main_ctx.fillStyle;
-			tool.shape_canvas.ctx.strokeStyle = main_ctx.strokeStyle;
-			tool.shape_canvas.ctx.lineWidth = main_ctx.lineWidth;
+			const target_ctx = document_model.get_active_layer_ctx();
+			tool.shape_canvas.ctx.fillStyle = target_ctx.fillStyle;
+			tool.shape_canvas.ctx.strokeStyle = target_ctx.strokeStyle;
+			tool.shape_canvas.ctx.lineWidth = target_ctx.lineWidth;
 			tool.shape(tool.shape_canvas.ctx, pointer_start.x, pointer_start.y, pointer.x - pointer_start.x, pointer.y - pointer_start.y);
 			const signed_width = pointer.x - pointer_start.x || 1;
 			const signed_height = pointer.y - pointer_start.y || 1;
@@ -1405,7 +1407,7 @@ tools.forEach((tool) => {
 				name: tool.name,
 				icon: get_icon_for_tool(tool),
 			}, () => {
-				main_ctx.drawImage(tool.shape_canvas, 0, 0);
+				document_model.get_active_layer_ctx().drawImage(tool.shape_canvas, 0, 0);
 				tool.shape_canvas = null;
 			});
 		};
@@ -1444,7 +1446,7 @@ tools.forEach((tool) => {
 				name: tool.name,
 				icon: get_icon_for_tool(tool),
 			}, () => {
-				tool.render_from_mask(main_ctx);
+				tool.render_from_mask(document_model.get_active_layer_ctx());
 
 				tool.mask_canvas.width = 1;
 				tool.mask_canvas.height = 1;
@@ -1550,7 +1552,7 @@ tools.forEach((tool) => {
 				name: tool.name,
 				icon: get_icon_for_tool(tool),
 			}, () => {
-				tool.render_from_mask(main_ctx);
+				tool.render_from_mask(document_model.get_active_layer_ctx());
 
 				tool.mask_canvas.width = 1;
 				tool.mask_canvas.height = 1;
@@ -1560,7 +1562,10 @@ tools.forEach((tool) => {
 		tool.paint = () => {
 			const brush = tool.get_brush();
 			const circumference_points = get_circumference_points_for_brush(brush.shape, brush.size);
-			const paint_ctx = tool.draw_directly ? main_ctx : tool.mask_canvas.ctx;
+			// Most freehand tools paint into a mask, which is tinted and composited when the stroke
+			// ends. The Pencil paints directly into the active layer instead (so you can see the
+			// stroke as you draw, and undo doesn't have to re-composite the whole document).
+			const paint_ctx = tool.draw_directly ? document_model.get_active_layer_ctx() : tool.mask_canvas.ctx;
 			paint_ctx.fillStyle = stroke_color;
 			const iterate_line = brush.size > 1 ? bresenham_dense_line : bresenham_line;
 			iterate_line(pointer_previous.x, pointer_previous.y, pointer.x, pointer.y, (x, y) => {
@@ -1568,6 +1573,23 @@ tools.forEach((tool) => {
 					paint_ctx.fillRect(x + point.x, y + point.y, 1, 1);
 				}
 			});
+			if (tool.draw_directly) {
+				// Stamp the body of the brush in the selected color. (The brush canvas is a black
+				// silhouette, which is fine for the mask path - it gets tinted at render time - but
+				// stamping it as-is here would paint black over the color.)
+				stamp_brush_canvas_tinted(paint_ctx, pointer_previous.x, pointer_previous.y, brush.shape, brush.size, stroke_color);
+				stamp_brush_canvas_tinted(paint_ctx, pointer.x, pointer.y, brush.shape, brush.size, stroke_color);
+				// The visible canvas shows the composited document, so the model has to be told what
+				// changed (including the brush overhang around the segment).
+				const margin = brush.size + 1;
+				document_model.invalidate({
+					x: Math.min(pointer_previous.x, pointer.x) - margin,
+					y: Math.min(pointer_previous.y, pointer.y) - margin,
+					width: Math.abs(pointer.x - pointer_previous.x) + margin * 2,
+					height: Math.abs(pointer.y - pointer_previous.y) + margin * 2,
+				});
+				return;
+			}
 			stamp_brush_canvas(paint_ctx, pointer_previous.x, pointer_previous.y, brush.shape, brush.size);
 			stamp_brush_canvas(paint_ctx, pointer.x, pointer.y, brush.shape, brush.size);
 		};

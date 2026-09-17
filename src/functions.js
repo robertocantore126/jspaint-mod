@@ -9,7 +9,9 @@ import { OnCanvasSelection } from "./OnCanvasSelection.js";
 import { OnCanvasTextBox } from "./OnCanvasTextBox.js";
 // import { localize } from "./app-localization.js";
 import { default_palette } from "./color-data.js";
-import { image_formats } from "./file-format-data.js";
+import { document_model } from "./document-model.js";
+import { document_formats, image_formats } from "./file-format-data.js";
+import { is_layered_file, read_layered_file, write_layered_file } from "./document-handlers.js";
 import { $G, E, TAU, canvas_scroll_origin, debounce, from_canvas_coords, get_help_folder_icon, get_icon_for_tool, get_rgba_from_color, is_discord_embed, is_pride_month, make_canvas, render_access_key, to_canvas_coords } from "./helpers.js";
 import { apply_image_transformation, draw_grid, draw_selection_box, flip_horizontal, flip_vertical, invert_monochrome, invert_rgb, rotate, stretch_and_skew, threshold_black_and_white } from "./image-manipulation.js";
 import { show_imgur_uploader } from "./imgur.js";
@@ -730,7 +732,7 @@ function draw_canvas_scaled_down(ctx, source, dest_x, dest_y) {
  * @param {boolean} is_helper_layer
  */
 function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_layer) {
-	update_fill_and_stroke_colors_and_lineWidth(selected_tool);
+	update_fill_and_stroke_colors_and_lineWidth(document_model.get_active_layer_ctx(), selected_tool);
 
 	const grid_visible = show_grid && magnification >= 4 && (window.devicePixelRatio * magnification) >= 4 && is_helper_layer;
 
@@ -741,6 +743,8 @@ function render_canvas_view(hcanvas, scale, viewport_x, viewport_y, is_helper_la
 	if (!is_helper_layer) {
 		// Draw the actual document canvas (for the thumbnail)
 		// (For the main canvas view, the helper layer is separate from (and overlaid on top of) the document canvas)
+		// The main canvas always shows the composited document (see document-model.js), so it can be
+		// drawn directly here.
 		hctx.drawImage(main_canvas, viewport_x, viewport_y, hcanvas.width, hcanvas.height, 0, 0, hcanvas.width, hcanvas.height);
 	} else if (scale < 1) {
 		// Zoomed out, the view is a scaled-down image of the document, and the document canvas itself
@@ -1165,13 +1169,16 @@ function reset_canvas_and_history() {
 	});
 	history_node_to_cancel_to = null;
 
-	main_canvas.width = Math.max(1, my_canvas_width);
-	main_canvas.height = Math.max(1, my_canvas_height);
-	main_ctx.disable_image_smoothing();
-	main_ctx.fillStyle = selected_colors.background;
-	main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
+	// A new document starts as a single layer filled with the background color. The layer tree is
+	// part of the document, so it has to be reset along with the canvas and the history.
+	document_model.reset_document(
+		Math.max(1, my_canvas_width),
+		Math.max(1, my_canvas_height),
+		transparency ? null : selected_colors.background,
+	);
 
 	current_history_node.image_data = main_ctx.getImageData(0, 0, main_canvas.width, main_canvas.height);
+	current_history_node.layer_history_state = document_model.snapshot();
 
 	$canvas_area.trigger("resize");
 	$G.triggerHandler("history-update"); // update history view
@@ -1185,6 +1192,7 @@ function reset_canvas_and_history() {
  * @param {number=} options.timestamp - when this state was created
  * @param {boolean=} options.soft - indicates that undo should skip this state; it can still be accessed with the History window
  * @param {ImageData | null=} options.image_data - the image data for the canvas (TODO: region updates)
+ * @param {unknown=} options.layer_history_state - serialized layer tree for layer-aware undo/redo
  * @param {ImageData | null=} options.selection_image_data - the image data for the selection, if any
  * @param {number=} options.selection_x - the x position of the selection, if any
  * @param {number=} options.selection_y - the y position of the selection, if any
@@ -1208,6 +1216,7 @@ function make_history_node({
 	timestamp = Date.now(), // when this state was created
 	soft = false, // indicates that undo should skip this state; it can still be accessed with the History window
 	image_data = null, // the image data for the canvas (TODO: region updates)
+	layer_history_state = null,
 	selection_image_data = null, // the image data for the selection, if any
 	selection_x, // the x position of the selection, if any
 	selection_y, // the y position of the selection, if any
@@ -1230,6 +1239,7 @@ function make_history_node({
 		timestamp,
 		soft,
 		image_data,
+		layer_history_state,
 		selection_image_data,
 		selection_x,
 		selection_y,
@@ -1459,9 +1469,11 @@ async function load_image_from_uri(uri) {
  * @param {() => void} [canceled]
  * @param {boolean} [into_existing_session]
  * @param {boolean} [from_session_load]
+ * @param {object | null} [saved_layers] - a saved layer tree (see document_model.serialize()), to
+ *   restore over the image, for sessions that were saved with layers
  */
-function open_from_image_info(info, callback, canceled, into_existing_session, from_session_load) {
-	are_you_sure(({ canvas_modified_while_loading } = {}) => {
+function open_from_image_info(info, callback, canceled, into_existing_session, from_session_load, saved_layers = null) {
+	are_you_sure(async ({ canvas_modified_while_loading } = {}) => {
 		deselect();
 		cancel();
 
@@ -1475,13 +1487,22 @@ function open_from_image_info(info, callback, canceled, into_existing_session, f
 		reset_canvas_and_history(); // (with newly reset colors)
 		set_magnification(default_magnification);
 
-		main_ctx.copy(info.image || info.image_data);
+		// The opened image replaces the document: a single layer containing the image.
+		document_model.load_image(info.image || info.image_data);
+		if (saved_layers) {
+			// A session saved with layers restores them over the flattened image, which stays as the
+			// base: if the layers can't be read, the document is the image, as before.
+			await document_model.load_serialized(saved_layers);
+		}
 		apply_file_format_and_palette_info(info);
 		transparency = has_any_transparency(main_ctx);
 		$canvas_area.trigger("resize");
 
 		current_history_node.name = localize("Open");
 		current_history_node.image_data = main_ctx.getImageData(0, 0, main_canvas.width, main_canvas.height);
+		// (Without this, undoing back to the opened document would fall back to loading the flattened
+		// image, collapsing a restored layer tree into a single layer.)
+		current_history_node.layer_history_state = document_model.snapshot();
 		current_history_node.icon = get_help_folder_icon("p_open.png");
 
 		if (canvas_modified_while_loading || !from_session_load) {
@@ -1515,7 +1536,31 @@ function open_from_image_info(info, callback, canceled, into_existing_session, f
  * @param {Blob} file
  * @param {UserFileHandle} source_file_handle
  */
-function open_from_file(file, source_file_handle) {
+async function open_from_file(file, source_file_handle) {
+	// A layered document can't be decoded as an image, so detect it first, by extension, MIME type,
+	// or ZIP magic bytes, and route it to the layer-tree loader. Anything else (and anything that
+	// fails to parse) goes through the single-image + palette path.
+	try {
+		if (await is_layered_file(file)) {
+			const layered_info = await read_layered_file(file);
+			if (layered_info) {
+				layered_info.source_file_handle = source_file_handle;
+				open_from_image_info(layered_info, null, null, false, false, layered_info.saved_layers);
+				return;
+			}
+		}
+	} catch (_layered_error) {
+		// Not a readable layered file; fall through to the image + palette path below.
+	}
+	open_from_file_as_image(file, source_file_handle);
+}
+
+/**
+ * The image + palette loading path, used for everything that isn't a layered document.
+ * @param {Blob} file
+ * @param {UserFileHandle} source_file_handle
+ */
+function open_from_file_as_image(file, source_file_handle) {
 	// The browser isn't very smart about MIME types.
 	// It seems to look at the file extension, but not the actual file contents.
 	// This is particularly problematic for files with no extension, where file.type gives an empty string.
@@ -1608,9 +1653,43 @@ function file_new() {
 }
 
 async function file_open() {
-	const { file, fileHandle } = await systemHooks.showOpenFileDialog({ formats: image_formats });
+	const { file, fileHandle } = await systemHooks.showOpenFileDialog({ formats: document_formats });
 	open_from_file(file, fileHandle);
 }
+
+// #region Layered file export
+
+/**
+ * Saves the current document as a layered file (.jjlayers) using the browser's normal save
+ * dialog + the app's existing blob write path.
+ */
+function file_save_layered() {
+	systemHooks.showSaveFileDialog({
+		dialogTitle: localize("Save As"),
+		defaultFileName: file_name.replace(/\.jjlayers?$/i, "") + ".jjlayers",
+		defaultFileFormatID: "application/x-jjlayers",
+		formats: document_formats,
+		getBlob: (formatID) => {
+			if (formatID === "application/x-jjlayers") {
+				return write_layered_file();
+			}
+			return new Promise((resolve) => {
+				write_image_file(main_canvas, formatID, (blob) => {
+					resolve(blob);
+				});
+			});
+		},
+		savedCallbackUnreliable: ({ newFileName, newFileFormatID, newFileHandle }) => {
+			saved = true;
+			system_file_handle = newFileHandle;
+			file_name = newFileName;
+			file_format = newFileFormatID;
+			update_title();
+		},
+	});
+}
+
+// #endregion
 
 /** @type {OSGUI$Window} */
 let $file_load_from_url_window;
@@ -1701,7 +1780,16 @@ function file_save(maybe_saved_callback = () => { }, update_from_saved = true) {
 	if (!save_file_handle || file_name.match(/\.(svg|pdf)$/i)) {
 		return file_save_as(maybe_saved_callback, update_from_saved);
 	}
-	write_image_file(main_canvas, file_format, async (blob) => {
+	// Re-saving a document that was opened or saved as a layered file must keep its layers.
+	const layered = file_format === "application/x-jjlayers";
+	const write_blob = (callback) => {
+		if (layered) {
+			write_layered_file().then(callback);
+		} else {
+			write_image_file(main_canvas, file_format, callback);
+		}
+	};
+	write_blob(async (blob) => {
 		// An error may be shown by `systemHooks.writeBlobToHandle`,
 		// or it may be unknown whether the save will succeed,
 		// so for now: true means definite success, false means failure or cancelation, and undefined means it's unknown.
@@ -1715,8 +1803,9 @@ function file_save(maybe_saved_callback = () => { }, update_from_saved = true) {
 		}
 		// However, we can still apply format-specific color reduction to the canvas,
 		// and call the "maybe saved" callback, which, as the name implies, is intended to handle the uncertainty.
+		// (A layered bundle isn't an image, so there's nothing to apply to the canvas.)
 		if (success !== false) {
-			if (update_from_saved) {
+			if (update_from_saved && !layered) {
 				update_from_saved_file(blob);
 			}
 			maybe_saved_callback();
@@ -1728,11 +1817,14 @@ function file_save_as(maybe_saved_callback = () => { }, update_from_saved = true
 	deselect();
 	systemHooks.showSaveFileDialog({
 		dialogTitle: localize("Save As"),
-		formats: image_formats,
+		formats: document_formats,
 		defaultFileName: file_name,
 		defaultPath: typeof system_file_handle === "string" ? system_file_handle : null,
 		defaultFileFormatID: file_format,
 		getBlob: (new_file_type) => {
+			if (new_file_type === "application/x-jjlayers") {
+				return write_layered_file();
+			}
 			return new Promise((resolve) => {
 				write_image_file(main_canvas, new_file_type, (blob) => {
 					resolve(blob);
@@ -1746,7 +1838,7 @@ function file_save_as(maybe_saved_callback = () => { }, update_from_saved = true
 			file_format = newFileFormatID;
 			update_title();
 			maybe_saved_callback();
-			if (update_from_saved) {
+			if (update_from_saved && newFileFormatID !== "application/x-jjlayers") {
 				update_from_saved_file(newBlob);
 			}
 		},
@@ -2540,7 +2632,11 @@ function go_to_history_node(target_history_node, canceling) {
 	saved = false;
 	update_title();
 
-	main_ctx.copy(target_history_node.image_data);
+	if (!document_model.restore(target_history_node.layer_history_state)) {
+		// States with no layer snapshot (or from a version before layers) become a single-layer
+		// document containing that state's flattened image.
+		document_model.load_image(target_history_node.image_data);
+	}
 	if (target_history_node.selection_image_data) {
 		if (selection) {
 			selection.destroy();
@@ -2646,12 +2742,18 @@ function undoable({ name, icon, use_loose_canvas_changes, soft, assume_saved }, 
 	}
 
 	const before_callback_history_node = current_history_node;
+	// Make the active layer's pixels private to this operation, so the previous history state keeps
+	// the pixels it was taken with (copy-on-write; this is free within a stroke).
+	document_model.begin_edit();
 	callback?.();
 	if (current_history_node !== before_callback_history_node) {
 		show_error_message(`History node switched during undoable callback for ${name}. This shouldn't happen.`);
 		window.console?.log(`History node switched during undoable callback for ${name}, from`, before_callback_history_node, "to", current_history_node);
 	}
 
+	// The operation may have painted without telling the model where it changed; the state being
+	// recorded has to be complete.
+	document_model.invalidate();
 	const image_data = main_ctx.getImageData(0, 0, main_canvas.width, main_canvas.height);
 
 	redos.length = 0;
@@ -2659,6 +2761,7 @@ function undoable({ name, icon, use_loose_canvas_changes, soft, assume_saved }, 
 
 	const new_history_node = make_history_node({
 		image_data,
+		layer_history_state: document_model.snapshot(),
 		selection_image_data: selection && selection.canvas.ctx.getImageData(0, 0, selection.canvas.width, selection.canvas.height),
 		selection_x: selection && selection.x,
 		selection_y: selection && selection.y,
@@ -2690,8 +2793,11 @@ function undoable({ name, icon, use_loose_canvas_changes, soft, assume_saved }, 
  */
 function make_or_update_undoable(undoable_meta, undoable_action) {
 	if (current_history_node.futures.length === 0 && undoable_meta.match(current_history_node)) {
+		document_model.begin_edit();
 		undoable_action();
+		document_model.invalidate();
 		current_history_node.image_data = main_ctx.getImageData(0, 0, main_canvas.width, main_canvas.height);
+		current_history_node.layer_history_state = document_model.snapshot();
 		current_history_node.selection_image_data = selection && selection.canvas.ctx.getImageData(0, 0, selection.canvas.width, selection.canvas.height);
 		current_history_node.selection_x = selection && selection.x;
 		current_history_node.selection_y = selection && selection.y;
@@ -2972,6 +3078,10 @@ function cancel(going_to_history_node, discard_document_state) {
  * @param {boolean} [going_to_history_node]
  */
 function meld_selection_into_canvas(going_to_history_node) {
+	// The selection draws into the active layer before the undoable below records the change, so the
+	// layer's canvas has to be made private to this edit first (otherwise undoing would not bring
+	// back the hole the selection left).
+	document_model.begin_edit();
 	selection.draw();
 	selection.destroy();
 	selection = null;
@@ -2998,7 +3108,8 @@ function meld_textbox_into_canvas(going_to_history_node) {
 			name: "Finish Text",
 			icon: get_icon_for_tool(get_tool_by_id(TOOL_TEXT)),
 		}, () => {
-			main_ctx.drawImage(textbox.canvas, textbox.x, textbox.y);
+			document_model.get_active_layer_ctx().drawImage(textbox.canvas, textbox.x, textbox.y);
+			document_model.invalidate();
 			textbox.destroy();
 			textbox = null;
 		});
@@ -3018,7 +3129,7 @@ function deselect(going_to_history_node) {
 		meld_textbox_into_canvas(going_to_history_node);
 	}
 	for (const selected_tool of selected_tools) {
-		selected_tool.end?.(main_ctx);
+		selected_tool.end?.(document_model.get_active_layer_ctx());
 	}
 }
 
@@ -3235,12 +3346,14 @@ function clear() {
 		saved = false;
 		update_title();
 
+		const ctx = document_model.get_active_layer_ctx();
 		if (transparency) {
-			main_ctx.clearRect(0, 0, main_canvas.width, main_canvas.height);
+			ctx.clearRect(0, 0, main_canvas.width, main_canvas.height);
 		} else {
-			main_ctx.fillStyle = selected_colors.background;
-			main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
+			ctx.fillStyle = selected_colors.background;
+			ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
 		}
+		document_model.invalidate();
 	});
 }
 
@@ -3606,17 +3719,26 @@ function make_opaque() {
 		name: "Make Opaque",
 		icon: get_help_folder_icon("p_make_opaque.png"),
 	}, () => {
-		main_ctx.save();
-		main_ctx.globalCompositeOperation = "destination-atop";
+		// The document as a whole becomes opaque, which is achieved by filling in the transparency
+		// of the bottom-most layer (filling every layer would hide the layers below).
+		const bottom_layer = document_model.flatten_bottom_to_top()[0];
+		if (!bottom_layer || !bottom_layer.canvas) { return; }
+		// This paints into a layer that may not be the active one, so make its pixels private to this
+		// edit (undoable() only does that for the active layer).
+		document_model.begin_edit(bottom_layer.id);
+		const ctx = bottom_layer.canvas.ctx;
+		ctx.save();
+		ctx.globalCompositeOperation = "destination-atop";
 
-		main_ctx.fillStyle = selected_colors.background;
-		main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
+		ctx.fillStyle = selected_colors.background;
+		ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
 
 		// in case the selected background color is transparent/translucent
-		main_ctx.fillStyle = "white";
-		main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
+		ctx.fillStyle = "white";
+		ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
 
-		main_ctx.restore();
+		ctx.restore();
+		document_model.invalidate();
 	});
 }
 
@@ -3636,26 +3758,14 @@ function resize_canvas_without_saving_dimensions(unclamped_width, unclamped_heig
 			icon: undoable_meta.icon || get_help_folder_icon("p_stretch_both.png"),
 		}, () => {
 			try {
-				const image_data = offset_x || offset_y ? null : main_ctx.getImageData(0, 0, new_width, new_height);
-				const original_canvas = image_data ? null : make_canvas(main_canvas.width, main_canvas.height);
-				if (original_canvas) {
-					original_canvas.ctx.drawImage(main_canvas, 0, 0);
-				}
-				main_canvas.width = new_width;
-				main_canvas.height = new_height;
-				main_ctx.disable_image_smoothing();
-
-				if (!transparency) {
-					main_ctx.fillStyle = selected_colors.background;
-					main_ctx.fillRect(0, 0, main_canvas.width, main_canvas.height);
-				}
-
-				if (image_data) {
-					const temp_canvas = make_canvas(image_data);
-					main_ctx.drawImage(temp_canvas, 0, 0);
-				} else {
-					main_ctx.drawImage(original_canvas, -offset_x, -offset_y);
-				}
+				// Canvas size is a document-level property, so every layer is cropped/padded.
+				document_model.resize_canvas(
+					new_width,
+					new_height,
+					offset_x,
+					offset_y,
+					transparency ? null : selected_colors.background,
+				);
 			} catch (exception) {
 				if (exception.name === "NS_ERROR_FAILURE") {
 					// or localize("There is not enough memory or resources to complete operation.")
@@ -3873,7 +3983,8 @@ function show_convert_to_black_and_white() {
 	$w.addClass("convert-to-black-and-white");
 	$w.$main.append("<fieldset><legend>Threshold:</legend><input type='range' min='0' max='1' step='0.01' value='0.5'></fieldset>");
 	const $slider = $w.$main.find("input[type='range']");
-	const original_canvas = make_canvas(main_canvas);
+	// Like the other Image menu operations, this applies to the active layer.
+	const original_canvas = make_canvas(document_model.get_active_layer_canvas());
 	let threshold;
 	const update_threshold = () => {
 		make_or_update_undoable({
@@ -3882,8 +3993,10 @@ function show_convert_to_black_and_white() {
 			icon: get_help_folder_icon("p_monochrome.png"),
 		}, () => {
 			threshold = Number($slider.val());
-			main_ctx.copy(original_canvas);
-			threshold_black_and_white(main_ctx, threshold);
+			const ctx = document_model.get_active_layer_canvas().ctx;
+			ctx.copy(original_canvas);
+			threshold_black_and_white(ctx, threshold);
+			document_model.invalidate();
 		});
 	};
 	update_threshold();
@@ -3901,7 +4014,9 @@ function show_convert_to_black_and_white() {
 				name: "Cancel Make Monochrome",
 				icon: get_help_folder_icon("p_color.png"),
 			}, () => {
-				main_ctx.copy(original_canvas);
+				const ctx = document_model.get_active_layer_canvas().ctx;
+				ctx.copy(original_canvas);
+				document_model.invalidate();
 			});
 		}
 		$w.close();
@@ -4618,7 +4733,8 @@ function update_from_saved_file(blob) {
 			icon: get_help_folder_icon("p_save.png"),
 			assume_saved: true, // prevent setting saved to false
 		}, () => {
-			main_ctx.copy(info.image || info.image_data);
+			// The document becomes the saved file (this is how e.g. color depth reduction is applied).
+			document_model.load_image(info.image || info.image_data);
 		});
 	});
 }
@@ -4739,7 +4855,7 @@ export {
 	$this_version_news,
 	apply_file_format_and_palette_info, are_you_sure, cancel, change_some_url_params, change_url_param, choose_file_to_paste, cleanup_bitmap_view, clear, confirm_overwrite_capability, delete_selection, deselect, detect_monochrome, draw_canvas_scaled_down,
 	edit_copy, edit_cut, edit_paste, exit_fullscreen_if_ios, file_load_from_url, file_new, file_open, file_print, file_save,
-	file_save_as, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_opaque, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
+	file_save_as, file_save_layered, getSelectionText, get_all_url_params, get_history_ancestors, get_tool_by_id, get_uris, get_url_param, go_to_history_node, handle_keyshortcuts, has_any_transparency, image_attributes, image_flip_and_rotate, image_invert_colors, image_stretch_and_skew, load_image_from_uri, load_theme_from_text, make_history_node, make_monochrome_palette, make_monochrome_pattern, make_opaque, make_or_update_undoable, make_stripe_pattern, meld_selection_into_canvas,
 	meld_textbox_into_canvas, open_from_file, open_from_image_info, pan_view_by, paste, paste_image_from_file, please_enter_a_number, read_image_file, redo, render_canvas_view, render_history_as_gif, reset_canvas_and_history, reset_file, reset_selected_colors, resize_canvas_and_save_dimensions, resize_canvas_without_saving_dimensions, sanity_check_blob, save_as_prompt, save_selection_to_file, select_all, select_tool, select_tools, set_all_url_params, set_magnification, show_about_paint, show_convert_to_black_and_white, show_custom_zoom_window, show_document_history, show_error_message, show_file_format_errors, show_multi_user_setup_dialog, show_news, show_resource_load_error_message, switch_to_polychrome_palette, toggle_grid,
 	toggle_thumbnail, try_exec_command, undo, undoable, update_canvas_rect, update_canvas_scroll_margins, update_css_classes_for_conditional_messages, update_disable_aa, update_from_saved_file, update_helper_layer, update_helper_layer_immediately, update_magnified_canvas_size, update_title, view_bitmap, viewport_origin, visible_source_region, write_image_file
 };

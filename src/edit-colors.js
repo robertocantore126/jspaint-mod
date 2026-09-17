@@ -1,10 +1,11 @@
 // @ts-check
 /* global palette:writable */
-/* global $colorbox, localize, main_ctx, monochrome, selected_colors, selection */
+/* global $colorbox, localize, monochrome, selected_colors, selection */
 import { $Swatch, update_$swatch } from "./$ColorBox.js";
 import { $DialogWindow } from "./$ToolWindow.js";
 // import { localize } from "./app-localization.js";
 import { basic_colors, custom_colors } from "./color-data.js";
+import { document_model } from "./document-model.js";
 import { detect_monochrome, make_monochrome_palette, show_error_message, undoable } from "./functions.js";
 import { $G, get_help_folder_icon, get_rgba_from_color, make_canvas, render_access_key, rgb_to_hsl } from "./helpers.js";
 import { replace_color_globally } from "./image-manipulation.js";
@@ -88,7 +89,7 @@ function show_edit_colors_window($swatch_to_edit, color_selection_slot_to_edit) 
 			let old_rgba = get_rgba_from_color(palette[swatch_index]);
 			const new_rgba = get_rgba_from_color(color);
 			const other_rgba = get_rgba_from_color(palette[14 - swatch_index]);
-			const main_monochrome_info = detect_monochrome(main_ctx);
+			const main_monochrome_info = detect_monochrome(document_model.get_active_layer_ctx());
 			const selection_monochrome_info = (selection && selection.canvas) ? detect_monochrome(selection.canvas.ctx) : main_monochrome_info;
 			const selection_matches_main_canvas_colors =
 				selection_monochrome_info.isMonochrome &&
@@ -132,7 +133,7 @@ function show_edit_colors_window($swatch_to_edit, color_selection_slot_to_edit) 
 					name: "Recolor",
 					icon: get_help_folder_icon("p_color.png"),
 				}, () => {
-					recolor(main_ctx, main_monochrome_info.presentNonTransparentRGBAs);
+					recolor(document_model.get_active_layer_ctx(), main_monochrome_info.presentNonTransparentRGBAs);
 					if (selection && selection.canvas) {
 						recolor(selection.canvas.ctx, selection_monochrome_info.presentNonTransparentRGBAs);
 						// I feel like this shouldn't be necessary, if I'm not changing the size, but it makes it work:

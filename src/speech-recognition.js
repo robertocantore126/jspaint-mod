@@ -1,8 +1,9 @@
 // @ts-check
 // eslint-disable-next-line no-unused-vars
 /* global airbrush_size:writable, brush_size:writable, eraser_size:writable, pencil_size:writable, stroke_size:writable, pointer_active:writable, pointer_over_canvas:writable, pointer_previous:writable, pointer:writable */
-/* global $canvas_area, $status_text, button, localize, main_canvas, main_ctx, MENU_DIVIDER, selected_colors, selected_tool, selected_tools, tool_go */
+/* global $canvas_area, $status_text, button, localize, main_canvas, MENU_DIVIDER, selected_colors, selected_tool, selected_tools, tool_go */
 // import { localize } from "./app-localization.js";
+import { document_model } from "./document-model.js";
 import { deselect, get_tool_by_id, resize_canvas_without_saving_dimensions, select_tool, show_error_message, update_helper_layer } from "./functions.js";
 import { $G, make_canvas } from "./helpers.js";
 import { menus } from "./menus.js";
@@ -1991,6 +1992,9 @@ if (speech_recognition_available) {
 		const { layers } = trace_data;
 		const brush = get_tool_by_id(TOOL_BRUSH);
 		select_tool(brush);
+		// The sketch paints into the active layer over the course of the interval below, like a
+		// drawing gesture (which is what makes the layer's canvas private to this edit).
+		document_model.begin_stroke();
 
 		let layer_index = 0;
 		let path_index = 0;
@@ -2015,19 +2019,20 @@ if (speech_recognition_available) {
 			if (!segment) {
 				segment_index = 0;
 				path_index += 1;
-				brush.pointerup(main_ctx, pointer.x, pointer.y);
+				brush.pointerup(document_model.get_active_layer_ctx(), pointer.x, pointer.y);
 				return;
 			}
 			let { x1, y1, x2, y2 } = segment;
 			if (path !== active_path) {
 				pointer_previous = { x: x1, y: y1 };
 				pointer = { x: x1, y: y1 };
-				brush.pointerdown(main_ctx, x1, y1);
+				brush.pointerdown(document_model.get_active_layer_ctx(), x1, y1);
 				active_path = path;
 			}
 			pointer_previous = { x: x1, y: y1 };
 			pointer = { x: x2, y: y2 };
-			brush.paint(main_ctx, x2, y2);
+			brush.paint(document_model.get_active_layer_ctx(), x2, y2);
+			document_model.invalidate();
 			pointer_active = true;
 			pointer_over_canvas = true;
 			update_helper_layer();
@@ -2036,6 +2041,7 @@ if (speech_recognition_available) {
 	};
 	trace_and_sketch_stop = () => {
 		clearInterval(sketching_iid);
+		document_model.end_stroke();
 		pointer_active = false;
 		pointer_over_canvas = false;
 	};
