@@ -386,15 +386,30 @@ function activate_layer(id) {
 }
 
 /**
- * Selects a row (which may be a group), making it the target of delete/rename/reorder. Selecting a
- * layer also makes it the layer that tools draw into.
+ * Selects a row (which may be a group), making it the target of delete/duplicate/reorder and of the
+ * place new layers and groups go (see insertion_point).
+ *
+ * Selecting a layer also makes it the layer that tools draw into. Selecting a group keeps drawing
+ * in the active layer when it's inside that group, and otherwise switches to the group's top layer,
+ * so that selecting a set lets you draw inside it without hunting for the right layer.
+ *
  * @param {number} id
  */
 function select_node(id) {
 	const node = find_node(id);
 	if (!node) { return; }
 	selected_node_id = node.id;
-	if (node.type === "layer") { active_layer_id = node.id; }
+	if (node.type === "layer") {
+		active_layer_id = node.id;
+	} else {
+		const active = find_node(active_layer_id);
+		const active_is_inside = !!active && active.type === "layer" && is_descendant_of(active, node.id);
+		if (!active_is_inside) {
+			const layers = flatten_subtree_bottom_to_top(node);
+			const top = layers[layers.length - 1];
+			if (top) { active_layer_id = top.id; }
+		}
+	}
 	notify_tree_changed();
 }
 
@@ -415,16 +430,30 @@ function next_name(prefix) {
 }
 
 /**
- * Adds a layer directly above the active layer (inside the same group, if it's in one).
+ * Where a new layer belongs, based on what's selected: the top of the selected group, or directly
+ * above the selected layer (falling back to the active layer).
+ * @returns {{ parent_id: number, index: number }}
+ */
+function insertion_point() {
+	const selected = find_node(selected_node_id);
+	if (selected && selected.type === "group") {
+		return { parent_id: selected.id, index: (selected.children || []).length };
+	}
+	const reference = selected && selected.type === "layer" ? selected : get_active_layer();
+	const parent_id = find_parent_id(reference);
+	const siblings = find_node(parent_id)?.children || [];
+	const index = siblings.findIndex((child) => child.id === reference.id);
+	return { parent_id, index: index === -1 ? siblings.length : index + 1 };
+}
+
+/**
+ * Adds a layer: inside the selected group, or directly above the selected layer.
  * @returns {LayerNode}
  */
 function add_layer() {
-	const active = get_active_layer();
-	const parent_id = find_parent_id(active);
-	const siblings = (find_node(parent_id)?.children || []);
-	const index = siblings.findIndex((child) => child.id === active.id);
+	const { parent_id, index } = insertion_point();
 	const layer = make_layer_node(next_name("Layer"), make_canvas(main_canvas.width, main_canvas.height));
-	root = insert_node(root, parent_id, layer, index === -1 ? siblings.length : index + 1);
+	root = insert_node(root, parent_id, layer, index);
 	active_layer_id = layer.id;
 	selected_node_id = layer.id;
 	notify_tree_changed();
@@ -432,19 +461,49 @@ function add_layer() {
 }
 
 /**
- * Adds a group containing a new layer, above the active layer's top-level sibling.
+ * Adds a group containing a new layer.
+ *
+ * A new set goes inside the selected set. Otherwise it's created at the top level, above the
+ * selected layer's top-level ancestor, so that clicking "New set" repeatedly makes sibling sets
+ * instead of burying each new one inside the last one.
+ *
  * @returns {LayerNode}
  */
 function add_group() {
-	const active = get_active_layer();
-	const top_level_index = (root.children || []).findIndex((child) => is_descendant_of(active, child.id));
+	const selected = find_node(selected_node_id);
+	let parent_id = root.id;
+	let index = (root.children || []).length;
+	if (selected && selected.type === "group") {
+		parent_id = selected.id;
+		index = (selected.children || []).length;
+	} else {
+		const reference = selected && selected.type === "layer" ? selected : get_active_layer();
+		const top_level_index = (root.children || []).findIndex((child) => is_descendant_of(reference, child.id));
+		if (top_level_index !== -1) { index = top_level_index + 1; }
+	}
 	const layer = make_layer_node(next_name("Layer"), make_canvas(main_canvas.width, main_canvas.height));
 	const group = /** @type {LayerNode} */ ({ ...make_group_node(next_name("Set")), children: [layer] });
-	root = insert_node(root, root.id, group, top_level_index === -1 ? (root.children || []).length : top_level_index + 1);
+	root = insert_node(root, parent_id, group, index);
 	active_layer_id = layer.id;
 	selected_node_id = layer.id;
 	notify_tree_changed();
 	return group;
+}
+
+/**
+ * Whether a node can be deleted: the last layer can't, since deleting it would throw away the whole
+ * picture, and a document with no layers couldn't be drawn in.
+ * @param {number} id
+ * @returns {boolean}
+ */
+function can_delete(id) {
+	const node = find_node(id);
+	if (!node || node.id === root.id) { return false; }
+	const deleted_ids = new Set([
+		node.id,
+		...flatten_subtree_bottom_to_top(node).map((layer) => layer.id),
+	]);
+	return flatten_bottom_to_top().some((layer) => !deleted_ids.has(layer.id));
 }
 
 /**
@@ -457,8 +516,8 @@ function add_group() {
  * @returns {boolean} whether anything was deleted
  */
 function delete_node(id) {
-	const node = find_node(id);
-	if (!node || node.id === root.id) { return false; }
+	if (!can_delete(id)) { return false; }
+	const node = /** @type {LayerNode} */ (find_node(id));
 	const parent_id = find_parent_id(node);
 	const siblings = find_node(parent_id)?.children || [];
 	const index = siblings.findIndex((child) => child.id === node.id);
@@ -466,8 +525,6 @@ function delete_node(id) {
 		node.id,
 		...flatten_subtree_bottom_to_top(node).map((layer) => layer.id),
 	]);
-	const remaining_layer_count = flatten_bottom_to_top().filter((layer) => !deleted_ids.has(layer.id)).length;
-	if (remaining_layer_count < 1) { return false; }
 
 	root = remove_node(root, node.id);
 
@@ -496,7 +553,7 @@ function delete_node(id) {
 }
 
 /**
- * Moves a node to a new position.
+ * The index a node would end up at, or null if the move isn't possible or wouldn't change anything.
  *
  * `index` is interpreted as a position in the target parent's children *including* the node in its
  * current position, which is what "the index of the row it was dropped on (plus one for above)"
@@ -505,19 +562,49 @@ function delete_node(id) {
  * @param {number} id
  * @param {number} parent_id
  * @param {number} index
- * @returns {boolean}
+ * @returns {number | null}
  */
-function move_node(id, parent_id, index) {
+function resolve_move(id, parent_id, index) {
 	const node = find_node(id);
 	const parent = find_node(parent_id);
-	if (!node || !parent || parent.type !== "group" || node.id === root.id) { return false; }
-	if (node.id === parent_id || is_descendant_of(parent, node.id)) { return false; }
+	if (!node || !parent || parent.type !== "group" || node.id === root.id) { return null; }
+	// A node can't go inside itself or inside anything it contains.
+	if (node.id === parent_id || is_descendant_of(parent, node.id)) { return null; }
 	const old_parent_id = find_parent_id(node);
 	const old_index = (find_node(old_parent_id)?.children || []).findIndex((child) => child.id === node.id);
 	const target_index = (old_parent_id === parent_id && old_index !== -1 && old_index < index) ? index - 1 : index;
 	if (old_parent_id === parent_id && old_index === target_index) {
-		return false; // it's already there; this way, a drop that changes nothing isn't undoable
+		return null; // it's already there; this way, a drop that changes nothing isn't undoable
 	}
+	return target_index;
+}
+
+/**
+ * Whether `move_node` would actually move anything.
+ *
+ * The panel uses this to decide whether to show where a drag would land: showing a drop line over a
+ * spot the model refuses looks like a bug from the outside.
+ *
+ * @param {number} id
+ * @param {number} parent_id
+ * @param {number} index
+ * @returns {boolean}
+ */
+function can_move_node(id, parent_id, index) {
+	return resolve_move(id, parent_id, index) !== null;
+}
+
+/**
+ * Moves a node to a new position (see `resolve_move` for how `index` is read).
+ * @param {number} id
+ * @param {number} parent_id
+ * @param {number} index
+ * @returns {boolean}
+ */
+function move_node(id, parent_id, index) {
+	const node = find_node(id);
+	const target_index = resolve_move(id, parent_id, index);
+	if (!node || target_index === null) { return false; }
 
 	root = remove_node(root, node.id);
 	root = insert_node(root, parent_id, node, target_index);
@@ -570,6 +657,169 @@ function rename_node(id, name) {
 	if (!node || !name) { return; }
 	root = replace_node(root, id, { ...node, name });
 	notify_tree_changed();
+}
+
+/**
+ * @param {string} name
+ * @returns {boolean} whether any node in the document is already called that
+ */
+function name_exists(name) {
+	let found = false;
+	const walk = (node) => {
+		if (node.name === name) { found = true; }
+		for (const child of node.children || []) { walk(child); }
+	};
+	walk(root);
+	return found;
+}
+
+/**
+ * The name for a copy of a node: "X copy", or "X copy 2" if that's taken. Duplicating a duplicate
+ * counts up ("X copy" → "X copy 2") rather than stacking up "copy copy".
+ * @param {string} base_name
+ * @returns {string}
+ */
+function duplicate_name(base_name) {
+	const match = /^(.*?) copy(?: (\d+))?$/.exec(base_name);
+	const base = match ? match[1] : base_name;
+	const start = match ? (match[2] ? Number(match[2]) + 1 : 2) : 1;
+	for (let n = start; ; n++) {
+		const candidate = n === 1 ? `${base} copy` : `${base} copy ${n}`;
+		if (!name_exists(candidate)) { return candidate; }
+	}
+}
+
+/**
+ * @param {LayerNode} node
+ * @returns {LayerNode} a deep copy with fresh ids and private copies of the canvases
+ */
+function copy_node_for_duplicate(node) {
+	/** @type {LayerNode} */
+	const copy = { ...node, id: next_id++ };
+	if (node.type === "group") {
+		copy.children = (node.children || []).map(copy_node_for_duplicate);
+	} else if (node.canvas) {
+		copy.canvas = make_canvas(node.canvas);
+	}
+	return copy;
+}
+
+/**
+ * Duplicates a layer or group, placing the copy directly above the original in its group.
+ *
+ * The copy's canvases are new objects, so the copy can be painted into without touching the
+ * original (and without needing copy-on-write for history).
+ *
+ * @param {number} id
+ * @returns {boolean} whether anything was duplicated
+ */
+function duplicate_node(id) {
+	const node = find_node(id);
+	if (!node || node.id === root.id) { return false; }
+	const parent_id = find_parent_id(node);
+	const siblings = find_node(parent_id)?.children || [];
+	const index = siblings.findIndex((child) => child.id === node.id);
+	if (index === -1) { return false; }
+
+	const copy = copy_node_for_duplicate(node);
+	copy.name = duplicate_name(node.name);
+	root = insert_node(root, parent_id, copy, index + 1);
+	const copied_layer = topmost_layer_of([copy]);
+	if (copied_layer) { active_layer_id = copied_layer.id; }
+	selected_node_id = copy.id;
+
+	// Duplicating changes the composite when the original isn't fully opaque, so the visible canvas
+	// has to be redrawn, not just the panel.
+	invalidate();
+	notify_thumbnails_changed();
+	notify_tree_changed();
+	return true;
+}
+
+/**
+ * Whether a layer can be merged into the layer directly below it (they have to be layers in the
+ * same group; merging across a group boundary would change what the group's opacity applies to).
+ * @param {number} id
+ * @returns {boolean}
+ */
+function can_merge_down(id) {
+	const node = find_node(id);
+	if (!node || node.type !== "layer") { return false; }
+	const siblings = find_node(find_parent_id(node))?.children || [];
+	const index = siblings.findIndex((child) => child.id === node.id);
+	const below = siblings[index - 1];
+	return !!below && below.type === "layer" && !!below.canvas;
+}
+
+/**
+ * Merges a layer into the layer below it, then removes it.
+ *
+ * The layer below keeps its name and its own opacity; the merged-in layer's pixels are drawn with
+ * its opacity, so the result looks like the two did before merging (as far as they were opaque).
+ *
+ * @param {number} id
+ * @returns {boolean} whether anything was merged
+ */
+function merge_down(id) {
+	if (!can_merge_down(id)) { return false; }
+	const node = /** @type {LayerNode} */ (find_node(id));
+	const parent_id = find_parent_id(node);
+	const siblings = find_node(parent_id)?.children || [];
+	const index = siblings.findIndex((child) => child.id === node.id);
+	const below_id = siblings[index - 1].id;
+
+	// The pixels below are about to change, but an earlier history snapshot may still be holding
+	// this canvas, so make it private first (copy-on-write).
+	begin_edit(below_id);
+	const below = find_node(below_id);
+	if (!below || !below.canvas) { return false; }
+	const ctx = below.canvas.ctx;
+	ctx.save();
+	ctx.globalAlpha = Math.max(0, Math.min(1, node.opacity));
+	if (node.canvas) { ctx.drawImage(node.canvas, 0, 0); }
+	ctx.restore();
+
+	delete_node(node.id);
+	// The merged result *is* the layer that was below, so keep that one active and selected.
+	active_layer_id = below_id;
+	selected_node_id = below_id;
+
+	invalidate();
+	notify_thumbnails_changed();
+	notify_tree_changed();
+	return true;
+}
+
+/**
+ * @returns {boolean} whether the document is more than a single top-level layer
+ */
+function can_flatten() {
+	const children = root.children || [];
+	return children.length > 1 || (children.length === 1 && children[0].type !== "layer");
+}
+
+/**
+ * Replaces the document with a single layer holding the flattened composite, named after the
+ * layer that was at the bottom.
+ *
+ * Hidden layers and groups are not part of the composite, so (like in other editors) they are
+ * dropped; the operation is a single undo step, so it can always be taken back.
+ *
+ * @returns {boolean} whether anything was flattened
+ */
+function flatten_document() {
+	if (!can_flatten()) { return false; }
+	const layers = flatten_bottom_to_top();
+	const flattened = to_canvas();
+	const layer = make_layer_node((layers[0] && layers[0].name) || "Layer 1", flattened);
+	root = { ...make_group_node("Document"), children: [layer] };
+	active_layer_id = layer.id;
+	selected_node_id = layer.id;
+
+	invalidate();
+	notify_thumbnails_changed();
+	notify_tree_changed();
+	return true;
 }
 
 // #endregion
@@ -854,6 +1104,48 @@ function to_canvas() {
 	const canvas = make_canvas(main_canvas.width, main_canvas.height);
 	render_to(canvas.ctx, 0, 0, main_canvas.width, main_canvas.height, 0, 0, main_canvas.width, main_canvas.height);
 	return canvas;
+}
+
+/**
+ * A node's subtree as it would look if the node itself were shown, cropped to the bounding box of
+ * its non-transparent pixels. Used to load a layer or set as a selection.
+ *
+ * The node's own visibility is ignored (loading a hidden set as a selection is still meaningful),
+ * but its children's visibility is respected, since that's what "the set's contents" means. The
+ * node's own opacity is applied, so the selection holds the pixels as they appear.
+ *
+ * @param {number} id
+ * @returns {{ canvas: PixelCanvas, x: number, y: number } | null} null if there's nothing to select
+ */
+function to_node_canvas(id) {
+	const node = find_node(id);
+	if (!node) { return null; }
+	const width = main_canvas.width;
+	const height = main_canvas.height;
+	const full = make_canvas(width, height);
+	const whole = { x: 0, y: 0, width, height };
+	render_node(full.ctx, { ...node, visible: true }, whole, whole, 0);
+
+	const data = full.ctx.getImageData(0, 0, width, height).data;
+	let min_x = width;
+	let min_y = height;
+	let max_x = -1;
+	let max_y = -1;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			if (data[(y * width + x) * 4 + 3] > 0) {
+				if (x < min_x) { min_x = x; }
+				if (x > max_x) { max_x = x; }
+				if (y < min_y) { min_y = y; }
+				if (y > max_y) { max_y = y; }
+			}
+		}
+	}
+	if (max_x < min_x || max_y < min_y) { return null; }
+
+	const cropped = make_canvas(max_x - min_x + 1, max_y - min_y + 1);
+	cropped.ctx.drawImage(full, min_x, min_y, cropped.width, cropped.height, 0, 0, cropped.width, cropped.height);
+	return { canvas: cropped, x: min_x, y: min_y };
 }
 
 // #endregion
@@ -1141,11 +1433,16 @@ const document_model = {
 	add_layer,
 	begin_edit,
 	begin_stroke,
+	can_delete,
+	can_flatten,
+	can_merge_down,
 	delete_node,
+	duplicate_node,
 	end_stroke,
 	find_node,
 	find_parent_id,
 	flatten_bottom_to_top,
+	flatten_document,
 	flatten_top_to_bottom,
 	get_active_layer,
 	get_active_layer_canvas,
@@ -1155,7 +1452,9 @@ const document_model = {
 	invalidate,
 	load_image,
 	load_serialized,
+	merge_down,
 	move_node,
+	can_move_node,
 	notify_thumbnails_changed,
 	notify_tree_changed,
 	rename_node,
@@ -1174,6 +1473,7 @@ const document_model = {
 	set_visible,
 	snapshot,
 	to_canvas,
+	to_node_canvas,
 	transform_layers,
 };
 

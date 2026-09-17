@@ -99,6 +99,45 @@ const layer_names = (win) => win.api_for_cypress_tests.document_model.flatten_bo
 const row_names = (win) => win.api_for_cypress_tests.$(".layers-list .layer-row .layer-name").toArray().map((el) => el.textContent);
 
 /**
+ * Drags one layer row onto another, with the pointer events a mouse drag produces.
+ *
+ * The panel does its own dragging with pointer events rather than the browser's drag-and-drop, so
+ * this follows the same path a real mouse takes.
+ *
+ * @param {any} win
+ * @param {string} from_name the row to pick up
+ * @param {string} to_name the row to drop it on
+ * @param {number} ratio where on the target row the pointer lands: 0.1 is its top edge (drops above
+ *   it, or into a set), 0.5 is its middle (into a set), 0.9 is its bottom edge (drops below it)
+ * @param {boolean} [release] false to stop mid-drag, to look at the indicator without dropping
+ * @returns {string} the drop indicator the target row showed, or "" if it showed none
+ */
+const drag_row = (win, from_name, to_name, ratio, release = true) => {
+	const rows = [...win.document.querySelectorAll(".layers-list .layer-row")];
+	const row_for = (name) => rows.find((row) => row.querySelector(".layer-name")?.textContent === name);
+	const from = row_for(from_name);
+	const to = row_for(to_name);
+	if (!from || !to) { throw new Error(`no layer row named ${from ? to_name : from_name}`); }
+	const from_rect = from.getBoundingClientRect();
+	const rect = to.getBoundingClientRect();
+	const base = { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, buttons: 1, bubbles: true, cancelable: true };
+	const x = rect.left + 20;
+	from.dispatchEvent(new win.PointerEvent("pointerdown", { ...base, clientX: from_rect.left + 20, clientY: from_rect.top + from_rect.height / 2 }));
+	// A mouse sends a stream of moves; the last one is the one that decides where it lands.
+	for (const step of [0.4, 0.7, 1]) {
+		win.dispatchEvent(new win.PointerEvent("pointermove", { ...base, clientX: x, clientY: rect.top + rect.height * ratio * step }));
+	}
+	const indicator = [...to.classList].filter((name) => name.startsWith("drop-")).join(" ");
+	if (release) {
+		win.dispatchEvent(new win.PointerEvent("pointerup", { ...base, buttons: 0, clientX: x, clientY: rect.top + rect.height * ratio }));
+	} else {
+		// Give up the drag, the way a cancelled pointer would, so nothing is left dangling.
+		win.dispatchEvent(new win.PointerEvent("pointercancel", { ...base, clientX: x, clientY: rect.top + rect.height * ratio }));
+	}
+	return indicator;
+};
+
+/**
  * The session id is in the URL hash; the storage keys are prefixed with it.
  * @param {any} win
  */
@@ -227,18 +266,97 @@ context("layers", () => {
 			const { $, document_model, undo } = win.api_for_cypress_tests;
 			$(".layers-toolbar button[title='New layer']").click();
 			expect(layer_names(win)).to.deep.equal(["Layer 1", "Layer 2"]);
-			$(".layers-toolbar button[title='Delete layer or group']").click();
+			$(".layers-toolbar button[title='Delete layer or set']").click();
 			expect(layer_names(win)).to.deep.equal(["Layer 1"]);
 			// Undo brings the layer back.
 			undo();
 			expect(layer_names(win)).to.deep.equal(["Layer 1", "Layer 2"]);
 			// The last layer can't be deleted (that would throw the picture away).
-			$(".layers-toolbar button[title='Delete layer or group']").click();
-			$(".layers-toolbar button[title='Delete layer or group']").click();
+			$(".layers-toolbar button[title='Delete layer or set']").click();
+			$(".layers-toolbar button[title='Delete layer or set']").click();
 			expect(layer_names(win).length).to.equal(1);
 			const layer = document_model.get_active_layer();
 			expect(!!layer.canvas).to.equal(true);
 			expect(document_model.find_node(layer.id)).to.equal(layer);
+		});
+	});
+
+	it("reorders layers by dragging a row up or down", () => {
+		cy.window().then({ timeout: 60000 }, (win) => {
+			const { $, undo } = win.api_for_cypress_tests;
+			$(".layers-toolbar button[title='New layer']").click();
+			$(".layers-toolbar button[title='New layer']").click();
+			expect(row_names(win)).to.deep.equal(["Layer 3", "Layer 2", "Layer 1"]);
+
+			// Dropped on the top half of "Layer 2": lands directly above it.
+			expect(drag_row(win, "Layer 1", "Layer 2", 0.1)).to.equal("drop-above");
+			expect(row_names(win)).to.deep.equal(["Layer 3", "Layer 1", "Layer 2"]);
+			expect(layer_names(win)).to.deep.equal(["Layer 2", "Layer 1", "Layer 3"]);
+
+			// Dropped on the bottom half of the bottom row: lands at the very bottom.
+			expect(drag_row(win, "Layer 3", "Layer 2", 0.9)).to.equal("drop-below");
+			expect(row_names(win)).to.deep.equal(["Layer 1", "Layer 2", "Layer 3"]);
+
+			undo();
+			expect(row_names(win)).to.deep.equal(["Layer 3", "Layer 1", "Layer 2"]);
+		});
+	});
+
+	it("drags a layer into a set and back out", () => {
+		cy.window().then({ timeout: 60000 }, (win) => {
+			const { $ } = win.api_for_cypress_tests;
+			$(".layers-toolbar button[title='New layer']").click();
+			$(".layers-toolbar button[title='New set']").click();
+			expect(row_names(win)).to.deep.equal(["Set 1", "Layer 3", "Layer 2", "Layer 1"]);
+			const [$set_row] = $(".layers-list .layer-row").toArray();
+			expect($set_row.querySelector(".layer-folder-icon") !== null, "a set shows a folder").to.equal(true);
+			expect($set_row.querySelector(".layer-thumbnail"), "not a layer thumbnail").to.equal(null);
+
+			// Dropped on the middle of the set's row: goes inside, on top.
+			expect(drag_row(win, "Layer 1", "Set 1", 0.5)).to.equal("drop-into");
+			expect(row_names(win)).to.deep.equal(["Set 1", "Layer 1", "Layer 3", "Layer 2"]);
+
+			// Dropped on the top of the set's row: comes back out, above the whole set.
+			expect(drag_row(win, "Layer 1", "Set 1", 0.1)).to.equal("drop-above");
+			expect(row_names(win)).to.deep.equal(["Layer 1", "Set 1", "Layer 3", "Layer 2"]);
+		});
+	});
+
+	it("only points out drops that would move something", () => {
+		cy.window().then({ timeout: 60000 }, (win) => {
+			const { $ } = win.api_for_cypress_tests;
+			$(".layers-toolbar button[title='New layer']").click();
+			$(".layers-toolbar button[title='New set']").click();
+			const before = row_names(win);
+
+			// "Layer 2" is already directly above "Layer 1": nothing to point at, nothing to do.
+			expect(drag_row(win, "Layer 2", "Layer 1", 0.1)).to.equal("");
+			expect(row_names(win)).to.deep.equal(before);
+			// A set has no room to go inside itself.
+			expect(drag_row(win, "Set 1", "Layer 3", 0.1)).to.equal("");
+			expect(row_names(win)).to.deep.equal(before);
+		});
+	});
+
+	it("knows which moves are possible", () => {
+		cy.window().then({ timeout: 60000 }, (win) => {
+			const { $, document_model } = win.api_for_cypress_tests;
+			$(".layers-toolbar button[title='New layer']").click();
+			$(".layers-toolbar button[title='New set']").click();
+			const root = document_model.get_root();
+			const [layer_1] = document_model.flatten_bottom_to_top();
+			const set = root.children.find((node) => node.type === "group");
+			// Nowhere to go: it's already where it would land.
+			expect(document_model.can_move_node(layer_1.id, root.id, 0)).to.equal(false);
+			// A node can't be put inside itself or inside its own contents.
+			expect(document_model.can_move_node(set.id, set.id, 0)).to.equal(false);
+			expect(document_model.can_move_node(set.id, set.children[0].id, 0)).to.equal(false);
+			// Anywhere else is fair game.
+			expect(document_model.can_move_node(layer_1.id, root.id, (root.children || []).length)).to.equal(true);
+			expect(document_model.can_move_node(layer_1.id, set.id, 0)).to.equal(true);
+			// And a refused move leaves the tree alone.
+			expect(document_model.move_node(set.id, set.id, 0)).to.equal(false);
+			expect(document_model.get_root()).to.equal(root);
 		});
 	});
 
@@ -469,7 +587,7 @@ context("layers: saving in a session", () => {
 		});
 		cy.window().then({ timeout: 60000 }, (win) => {
 			const { $, document_model } = win.api_for_cypress_tests;
-			$(".layers-toolbar button[title='Delete layer or group']").click();
+			$(".layers-toolbar button[title='Delete layer or set']").click();
 			expect(document_model.flatten_bottom_to_top().length).to.equal(1);
 		});
 		// A single layer is fully described by the flattened image, so the layer tree must not
